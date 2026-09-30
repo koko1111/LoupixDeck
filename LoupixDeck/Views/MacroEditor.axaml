@@ -1,0 +1,891 @@
+<Window
+    x:Class="LoupixDeck.Views.MacroEditor"
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:loc="using:LoupixDeck.Localization"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:vm="using:LoupixDeck.ViewModels"
+    xmlns:conv="clr-namespace:LoupixDeck.Models.Converter"
+    xmlns:macros="using:LoupixDeck.Models.Macros"
+    xmlns:models="using:LoupixDeck.Models"
+    x:DataType="vm:MacroEditorViewModel"
+    Title="{loc:Tr MacroEditor_MacroEditor}"
+    Width="1400"
+    Height="760"
+    mc:Ignorable="d"
+    CanResize="True"
+    MinWidth="1300"
+    MinHeight="620">
+
+    <Window.Resources>
+        <conv:ConditionTypeLabelConverter x:Key="ConditionTypeLabel" />
+    </Window.Resources>
+
+    <Window.Styles>
+        <StyleInclude Source="avares://LoupixDeck/Views/Styles/SettingsStyles.axaml" />
+
+        <!-- Step panel -->
+        <Style Selector="Border.step-panel">
+            <Setter Property="Background" Value="{DynamicResource AppSurface}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource AppBorderSubtle}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="6" />
+            <Setter Property="Margin" Value="0,0,0,6" />
+            <Setter Property="Padding" Value="10,4" />
+        </Style>
+        <Style Selector="Border.step-panel.dragging">
+            <Setter Property="Opacity" Value="0.55" />
+            <Setter Property="BorderBrush" Value="#4DA3FF" />
+        </Style>
+
+        <Style Selector="TextBlock.step-icon">
+            <Setter Property="FontFamily" Value="{StaticResource MdiFont}" />
+            <Setter Property="FontSize" Value="20" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+        </Style>
+        <Style Selector="TextBlock.step-type">
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="FontSize" Value="13" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+        </Style>
+        <Style Selector="TextBlock.step-value">
+            <Setter Property="Foreground" Value="{DynamicResource AppTextSecondary}" />
+            <Setter Property="FontSize" Value="13" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+            <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+        </Style>
+
+        <Style Selector="Border.drag-handle">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Cursor" Value="SizeAll" />
+            <Setter Property="Padding" Value="6,0" />
+        </Style>
+        <Style Selector="Border.drag-handle TextBlock">
+            <Setter Property="Foreground" Value="{DynamicResource AppTextMuted}" />
+        </Style>
+        <Style Selector="Border.drag-handle:pointerover TextBlock">
+            <Setter Property="Foreground" Value="{DynamicResource AppTextPrimary}" />
+        </Style>
+
+        <Style Selector="Border.step-editor">
+            <Setter Property="BorderBrush" Value="{DynamicResource AppBorderSubtle}" />
+            <Setter Property="BorderThickness" Value="0,1,0,0" />
+            <Setter Property="Margin" Value="0,4,0,0" />
+            <Setter Property="Padding" Value="2,8,2,4" />
+        </Style>
+
+        <Style Selector="TextBlock.editor-label">
+            <Setter Property="Foreground" Value="{DynamicResource AppTextSecondary}" />
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+        </Style>
+
+        <!-- Leading label of a step editor row: fixed width so the control after it always
+             starts at the same X across every step and across every row within a step. -->
+        <Style Selector="TextBlock.editor-label.lead">
+            <Setter Property="Width" Value="72" />
+        </Style>
+
+        <!-- Collapse/expand toggle on each step panel -->
+        <Style Selector="ToggleButton.step-expand">
+            <Setter Property="Background" Value="{DynamicResource AppControlBackground}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource AppBorderSubtle}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="4" />
+            <Setter Property="Width" Value="28" />
+            <Setter Property="Height" Value="28" />
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="HorizontalContentAlignment" Value="Center" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="Margin" Value="0,0,4,0" />
+            <Setter Property="FontSize" Value="14" />
+            <Setter Property="FontFamily" Value="{StaticResource MdiFont}" />
+            <Setter Property="Content" Value="&#xF0140;" />
+            <!-- mdi-chevron-down -->
+        </Style>
+        <Style Selector="ToggleButton.step-expand:checked">
+            <Setter Property="Content" Value="&#xF0143;" />
+            <!-- mdi-chevron-up -->
+        </Style>
+        <Style Selector="ToggleButton.step-expand:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+            <Setter Property="Background" Value="{DynamicResource AppControlBackgroundHover}" />
+        </Style>
+        <Style Selector="ToggleButton.step-expand:checked /template/ ContentPresenter#PART_ContentPresenter">
+            <Setter Property="Background" Value="{DynamicResource AppControlBackgroundActive}" />
+            <Setter Property="Foreground" Value="{DynamicResource AppTextPrimary}" />
+        </Style>
+        <Style Selector="ToggleButton.step-expand:checked:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+            <Setter Property="Background" Value="{DynamicResource AppControlBackgroundHover}" />
+            <Setter Property="Foreground" Value="{DynamicResource AppTextPrimary}" />
+        </Style>
+
+        <!-- Invalid-input highlight (macro name) -->
+        <Style Selector="TextBox.error /template/ Border#PART_BorderElement">
+            <Setter Property="BorderBrush" Value="#E05A5A" />
+        </Style>
+        <Style Selector="TextBox.error:pointerover /template/ Border#PART_BorderElement">
+            <Setter Property="BorderBrush" Value="#E05A5A" />
+        </Style>
+        <Style Selector="TextBox.error:focus /template/ Border#PART_BorderElement">
+            <Setter Property="BorderBrush" Value="#E05A5A" />
+        </Style>
+
+        <Style Selector="TextBlock.validation-error">
+            <Setter Property="Foreground" Value="#F08A8A" />
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="TextWrapping" Value="Wrap" />
+        </Style>
+    </Window.Styles>
+
+    <Grid RowDefinitions="Auto,*" Margin="14">
+
+        <!-- Title -->
+        <TextBlock Grid.Row="0" Classes="page-title" Text="{loc:Tr MacroEditor_MacroEditor}" />
+
+        <!-- Main content: macro list | step editor | sequence preview -->
+        <Grid Grid.Row="1" ColumnDefinitions="260,*,320">
+
+            <!-- Left: macro list -->
+            <Border Grid.Column="0" Classes="card" Margin="0,0,12,0" Padding="10">
+                <Grid RowDefinitions="Auto,*,Auto,Auto">
+                    <TextBlock Grid.Row="0" Classes="card-title" Text="{loc:Tr MacroEditor_Macros}" />
+
+                    <ListBox Grid.Row="1"
+                             ItemsSource="{Binding Macros}"
+                             SelectedItem="{Binding SelectedMacro, Mode=TwoWay}">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate DataType="{x:Type macros:Macro}">
+                                <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" />
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+
+                    <Grid Grid.Row="2" ColumnDefinitions="*,*" Margin="0,8,0,0">
+                        <Button Grid.Column="0"
+                                Content="{loc:Tr MacroEditor_AddMacro}"
+                                HorizontalAlignment="Stretch"
+                                HorizontalContentAlignment="Center"
+                                Margin="0,0,4,0"
+                                Command="{Binding AddMacroCommand}" />
+                        <Button Grid.Column="1"
+                                Content="{loc:Tr MacroEditor_Remove}"
+                                HorizontalAlignment="Stretch"
+                                HorizontalContentAlignment="Center"
+                                Margin="4,0,0,0"
+                                Background="#3A2424"
+                                Foreground="#E08A8A"
+                                IsEnabled="{Binding HasSelectedMacro}"
+                                Command="{Binding RemoveMacroCommand}" />
+                    </Grid>
+
+                    <!-- Global stop hotkey -->
+                    <StackPanel Grid.Row="3" Spacing="4" Margin="0,12,0,0">
+                        <TextBlock Classes="editor-label" Text="{loc:Tr MacroEditor_GlobalStopHotkey}" />
+                        <TextBox Text="{Binding StopHotkey, Mode=TwoWay}"
+                                 PlaceholderText="{loc:Tr MacroEditor_EGCtrlAltEsc}" />
+                        <TextBlock Classes="hint"
+                                   Text="{loc:Tr MacroEditor_CancelsAllRunningMacrosFrom}" />
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <!-- Middle: steps of the selected macro -->
+            <Border Grid.Column="1" Classes="card" Margin="0,0,12,0" Padding="14"
+                    IsVisible="{Binding HasSelectedMacro}">
+                <Grid RowDefinitions="Auto,Auto,Auto,*">
+
+                    <!-- Name + execution mode -->
+                    <Grid Grid.Row="0" RowDefinitions="Auto,Auto,Auto" ColumnDefinitions="Auto,*,Auto,200" Margin="0,0,0,10">
+                        <TextBlock Grid.Row="0" Grid.Column="0" Classes="editor-label" Text="{loc:Tr MacroEditor_Name}" Margin="0,0,10,0" />
+                        <TextBox Grid.Row="0" Grid.Column="1"
+                                 Classes.error="{Binding HasValidationMessage}"
+                                 Text="{Binding SelectedMacro.Name, Mode=TwoWay}" />
+                        <TextBlock Grid.Row="0" Grid.Column="2" Classes="editor-label"
+                                   Text="{loc:Tr MacroEditor_WhenTriggered}" Margin="16,0,10,0" />
+                        <ComboBox Grid.Row="0" Grid.Column="3"
+                                  HorizontalAlignment="Stretch"
+                                  ToolTip.Tip="{loc:Tr MacroEditor_RunOnceIgnoreReTriggers}"
+                                  ItemsSource="{x:Static macros:Macro.AllExecutionModes}"
+                                  SelectedItem="{Binding SelectedMacro.ExecutionMode, Mode=TwoWay}" />
+                        <TextBlock Grid.Row="1" Grid.Column="1"
+                                   Classes="validation-error"
+                                   Margin="0,4,0,0"
+                                   Text="{Binding ValidationMessage}"
+                                   IsVisible="{Binding HasValidationMessage}" />
+                    </Grid>
+
+                    <!-- Steps header + record / test / add button -->
+                    <StackPanel Grid.Row="1" Spacing="6" Margin="0,0,0,8">
+                      <Grid ColumnDefinitions="*,Auto,Auto,Auto">
+                        <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                            <TextBlock Classes="card-title" Text="{loc:Tr MacroEditor_Steps}" VerticalAlignment="Center" Margin="0" />
+                            <Button Classes="row-action" FontFamily="{StaticResource MdiFont}"
+                                    Content="&#xF054C;" Margin="6,0,0,0"
+                                    ToolTip.Tip="{loc:Tr MacroEditor_Undo}"
+                                    IsEnabled="{Binding CanUndo}"
+                                    Command="{Binding UndoCommand}" />
+                            <Button Classes="row-action" FontFamily="{StaticResource MdiFont}"
+                                    Content="&#xF054D;"
+                                    ToolTip.Tip="{loc:Tr MacroEditor_Redo}"
+                                    IsEnabled="{Binding CanRedo}"
+                                    Command="{Binding RedoCommand}" />
+                        </StackPanel>
+                        <Button Grid.Column="1" Margin="0,0,8,0"
+                                Content="{Binding RecordButtonText}"
+                                IsVisible="{Binding IsRecordingSupported}"
+                                ToolTip.Tip="{loc:Tr MacroEditor_RecordRealKeyPressesAs}"
+                                Command="{Binding ToggleRecordingCommand}" />
+                        <Button Grid.Column="2" Margin="0,0,8,0"
+                                Content="{Binding TestButtonText}"
+                                ToolTip.Tip="{loc:Tr MacroEditor_RunThisMacroAfterA}"
+                                IsEnabled="{Binding SelectedMacro.Steps.Count}"
+                                Command="{Binding TestMacroCommand}" />
+                        <Button Grid.Column="3" Content="{loc:Tr MacroEditor_AddStep}">
+                            <Button.Flyout>
+                                <MenuFlyout Placement="BottomEdgeAlignedRight">
+                                    <MenuItem Header="{loc:Tr MacroEditor_TypeText}" Tag="Text" Click="AddStepMenu_Click" />
+                                    <MenuItem Header="{loc:Tr MacroEditor_KeyCombination}" Tag="KeyCombination" Click="AddStepMenu_Click" />
+                                    <MenuItem Header="{loc:Tr MacroEditor_KeyDown}" Tag="KeyDown" Click="AddStepMenu_Click" />
+                                    <MenuItem Header="{loc:Tr MacroEditor_KeyUp}" Tag="KeyUp" Click="AddStepMenu_Click" />
+                                    <MenuItem Header="{loc:Tr MacroEditor_Delay}" Tag="Delay" Click="AddStepMenu_Click" />
+                                    <MenuItem Header="{loc:Tr MacroEditor_Mouse}" Tag="Mouse" Click="AddStepMenu_Click" />
+                                    <MenuItem Header="{loc:Tr MacroEditor_Command}" Tag="Command" Click="AddStepMenu_Click" />
+                                    <Separator />
+                                    <MenuItem Header="{loc:Tr MacroEditor_SetVariable}" Tag="SetVariable" Click="AddStepMenu_Click" />
+                                    <Separator />
+                                    <MenuItem Header="{loc:Tr MacroEditor_If}" Tag="If" Click="AddStepMenu_Click" />
+                                    <MenuItem Header="{loc:Tr MacroEditor_Else}" Tag="Else" Click="AddStepMenu_Click" />
+                                    <MenuItem Header="{loc:Tr MacroEditor_EndIf}" Tag="EndIf" Click="AddStepMenu_Click" />
+                                    <MenuItem Header="{loc:Tr MacroEditor_WaitFor}" Tag="WaitForCondition" Click="AddStepMenu_Click" />
+                                    <MenuItem Header="{loc:Tr MacroEditor_Prompt}" Tag="Prompt" Click="AddStepMenu_Click" />
+                                    <Separator />
+                                    <MenuItem Header="{loc:Tr MacroEditor_RepeatStart}" Tag="RepeatStart" Click="AddStepMenu_Click" />
+                                    <MenuItem Header="{loc:Tr MacroEditor_RepeatEnd}" Tag="RepeatEnd" Click="AddStepMenu_Click" />
+                                </MenuFlyout>
+                            </Button.Flyout>
+                        </Button>
+                      </Grid>
+
+                      <!-- Recording options + live status -->
+                      <StackPanel Orientation="Horizontal" Spacing="14"
+                                  IsVisible="{Binding IsRecordingSupported}">
+                          <CheckBox Content="{loc:Tr MacroEditor_CaptureDelays}"
+                                    ToolTip.Tip="{loc:Tr MacroEditor_RecordThePausesBetweenKey}"
+                                    IsChecked="{Binding CaptureRecordedDelays, Mode=TwoWay}" />
+                          <TextBlock Classes="hint" VerticalAlignment="Center"
+                                     Foreground="#E07A7A"
+                                     IsVisible="{Binding IsRecording}"
+                                     Text="{loc:Tr MacroEditor_RecordingKeysAreAddedLive}" />
+                      </StackPanel>
+                    </StackPanel>
+
+                    <!-- Bulk action toolbar: permanent select row, bulk actions below -->
+                    <StackPanel Grid.Row="2" Orientation="Vertical" Margin="0,0,0,4"
+                                IsVisible="{Binding SelectedMacro.Steps.Count}">
+                        <StackPanel.Styles>
+                            <Style Selector="WrapPanel > Button">
+                                <Setter Property="Margin" Value="0,0,4,4" />
+                            </Style>
+                        </StackPanel.Styles>
+
+                        <!-- Permanent selection controls -->
+                        <WrapPanel Orientation="Horizontal">
+                            <Button Content="{loc:Tr MacroEditor_SelectAll}" ToolTip.Tip="{loc:Tr MacroEditor_SelectAllSteps}"
+                                    Command="{Binding SelectAllStepsCommand}" />
+                            <Button Content="{loc:Tr MacroEditor_SelectNone}" ToolTip.Tip="{loc:Tr MacroEditor_ClearSelection}"
+                                    IsEnabled="{Binding HasSelectedSteps}" Command="{Binding ClearSelectionCommand}" />
+                            <TextBlock Classes="editor-label" VerticalAlignment="Center" Margin="6,0,0,4"
+                                       IsVisible="{Binding HasSelectedSteps}"
+                                       Text="{loc:TrFormat MacroEditor_SelectedCountFmt, SelectedStepCount}" />
+                        </WrapPanel>
+
+                        <!-- Bulk actions (only when actionable) -->
+                        <WrapPanel Orientation="Horizontal" IsVisible="{Binding HasBulkActions}">
+                            <Button Content="{loc:Tr MacroEditor_Duplicate}" IsEnabled="{Binding HasSelectedSteps}"
+                                    Command="{Binding DuplicateSelectedCommand}" />
+                            <Button Content="{loc:Tr MacroEditor_Copy}" IsEnabled="{Binding HasSelectedSteps}"
+                                    Command="{Binding CopySelectedCommand}" />
+                            <Button Content="{loc:Tr MacroEditor_Paste}" IsEnabled="{Binding HasClipboard}"
+                                    Command="{Binding PasteStepsCommand}" />
+                            <Button Content="{loc:Tr MacroEditor_Delete}" Background="#3A2424" Foreground="#E08A8A"
+                                    IsEnabled="{Binding HasSelectedSteps}" Command="{Binding DeleteSelectedCommand}" />
+
+                            <Border Width="1" Margin="4,2,8,6" Background="{DynamicResource AppBorderSubtle}"
+                                    IsVisible="{Binding HasSelectedSteps}" />
+
+                            <StackPanel Orientation="Horizontal" Spacing="6" Margin="0,0,0,4"
+                                        IsVisible="{Binding HasSelectedSteps}">
+                                <NumericUpDown Width="120" Minimum="0" Maximum="600000" Increment="50"
+                                               FormatString="0" Value="{Binding BulkDelayMs, Mode=TwoWay}"
+                                               ToolTip.Tip="{loc:Tr MacroEditor_DelayMsUsedByThe}" />
+                                <TextBlock Classes="editor-label" VerticalAlignment="Center" Text="{loc:Tr MacroEditor_Ms}" />
+                                <Button Margin="0" Content="{loc:Tr MacroEditor_InsertDelay}" ToolTip.Tip="{loc:Tr MacroEditor_InsertADelayStepOf}"
+                                        Command="{Binding InsertDelayAfterSelectedCommand}" />
+                                <Button Margin="0" Content="{loc:Tr MacroEditor_SetDelay}" ToolTip.Tip="{loc:Tr MacroEditor_SetEverySelectedDelayStep}"
+                                        IsVisible="{Binding HasSelectedDelay}"
+                                        Command="{Binding SetDelayOnSelectedCommand}" />
+                            </StackPanel>
+                        </WrapPanel>
+                    </StackPanel>
+
+                    <!-- Step list -->
+                    <ScrollViewer Grid.Row="3"
+                                  VerticalScrollBarVisibility="Auto"
+                                  HorizontalScrollBarVisibility="Disabled">
+                        <StackPanel>
+                            <ItemsControl Name="StepsList"
+                                          ItemsSource="{Binding SelectedMacro.Steps}"
+                                          PointerMoved="StepsList_PointerMoved"
+                                          PointerReleased="StepsList_PointerReleased"
+                                          PointerCaptureLost="StepsList_PointerCaptureLost">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate DataType="{x:Type macros:MacroStep}">
+                                        <Border Classes="step-panel" Classes.dragging="{Binding IsDragging}">
+                                            <Grid RowDefinitions="Auto,Auto">
+
+                                                <!-- Panel row: select | icon | type | value | expand | duplicate | remove | drag handle -->
+                                                <Grid Grid.Row="0"
+                                                      ColumnDefinitions="Auto,36,150,*,Auto,Auto,Auto,Auto"
+                                                      MinHeight="36">
+                                                    <CheckBox Grid.Column="0"
+                                                              VerticalAlignment="Center"
+                                                              Margin="0,0,6,0"
+                                                              ToolTip.Tip="{loc:Tr MacroEditor_SelectStepForBulkActions}"
+                                                              IsChecked="{Binding IsSelected, Mode=TwoWay}" />
+                                                    <TextBlock Grid.Column="1" Classes="step-icon"
+                                                               Text="{Binding Icon}" />
+                                                    <TextBlock Grid.Column="2" Classes="step-type"
+                                                               Text="{Binding TypeText}" />
+                                                    <TextBlock Grid.Column="3" Classes="step-value"
+                                                               Text="{Binding ValueText}" />
+
+                                                    <ToggleButton Grid.Column="4" Classes="step-expand"
+                                                                  VerticalAlignment="Center"
+                                                                  ToolTip.Tip="{loc:Tr MacroEditor_ExpandCollapseStepEditor}"
+                                                                  IsChecked="{Binding IsEditing, Mode=TwoWay}" />
+
+                                                    <Button Grid.Column="5" Classes="row-action"
+                                                            FontFamily="{StaticResource MdiFont}"
+                                                            Content="&#xF018F;"
+                                                            VerticalAlignment="Center"
+                                                            ToolTip.Tip="{loc:Tr MacroEditor_DuplicateStep}"
+                                                            Command="{Binding $parent[Window].((vm:MacroEditorViewModel)DataContext).DuplicateStepCommand}"
+                                                            CommandParameter="{Binding}" />
+
+                                                    <Button Grid.Column="6" Classes="row-action danger"
+                                                            FontFamily="{StaticResource MdiFont}"
+                                                            Content="&#xF01B4;"
+                                                            VerticalAlignment="Center"
+                                                            ToolTip.Tip="{loc:Tr MacroEditor_RemoveStep}"
+                                                            Click="RemoveStep_Click" />
+
+                                                    <Border Grid.Column="7" Classes="drag-handle"
+                                                            VerticalAlignment="Stretch"
+                                                            PointerPressed="DragHandle_PointerPressed">
+                                                        <TextBlock Classes="step-icon" Text="&#xF01DB;" />
+                                                    </Border>
+                                                </Grid>
+
+                                                <!-- Inline editor (expanded via Edit) -->
+                                                <Border Grid.Row="1" Classes="step-editor"
+                                                        IsVisible="{Binding IsEditing}">
+                                                    <ContentControl Content="{Binding}">
+                                                        <ContentControl.DataTemplates>
+
+                                                            <DataTemplate DataType="{x:Type macros:TextStep}">
+                                                                <Grid ColumnDefinitions="Auto,*">
+                                                                    <TextBlock Grid.Column="0" Classes="editor-label lead"
+                                                                               Text="{loc:Tr MacroEditor_Text}" Margin="0,0,10,0" />
+                                                                    <TextBox Grid.Column="1"
+                                                                             Text="{Binding Text, Mode=TwoWay}" />
+                                                                </Grid>
+                                                            </DataTemplate>
+
+                                                            <DataTemplate DataType="{x:Type macros:KeyCombinationStep}">
+                                                                <StackPanel Spacing="4">
+                                                                    <Grid ColumnDefinitions="Auto,*,Auto,Auto">
+                                                                        <TextBlock Grid.Column="0" Classes="editor-label lead"
+                                                                                   Text="{loc:Tr MacroEditor_Keys}" Margin="0,0,10,0" />
+                                                                        <TextBox Grid.Column="1"
+                                                                                 Text="{Binding Keys, Mode=TwoWay}" />
+                                                                        <ToggleButton Grid.Column="2" Margin="8,0,0,0"
+                                                                                      Content="{loc:Tr MacroEditor_Capture}"
+                                                                                      ToolTip.Tip="{loc:Tr MacroEditor_PressTheKeyCombinationTo}"
+                                                                                      IsCheckedChanged="CaptureToggle_IsCheckedChanged"
+                                                                                      KeyDown="Capture_KeyDown"
+                                                                                      KeyUp="Capture_KeyUp"
+                                                                                      LostFocus="Capture_LostFocus" />
+                                                                        <Button Grid.Column="3" Classes="row-action" Margin="6,0,0,0"
+                                                                                FontFamily="{StaticResource MdiFont}"
+                                                                                Content="&#xF02FD;"
+                                                                                ToolTip.Tip="{loc:Tr MacroEditor_ShowTheUsableKeyNames}"
+                                                                                Click="KeyReference_Click" />
+                                                                    </Grid>
+                                                                    <TextBlock Classes="hint"
+                                                                               Text="{loc:Tr MacroEditor_KeyNamesJoinedWithE}" />
+                                                                </StackPanel>
+                                                            </DataTemplate>
+
+                                                            <DataTemplate DataType="{x:Type macros:DelayStep}">
+                                                                <Grid ColumnDefinitions="Auto,Auto,Auto">
+                                                                    <TextBlock Grid.Column="0" Classes="editor-label lead"
+                                                                               Text="{loc:Tr MacroEditor_Duration}" Margin="0,0,10,0" />
+                                                                    <NumericUpDown Grid.Column="1" Width="140"
+                                                                                   Minimum="0" Maximum="600000"
+                                                                                   Increment="50" FormatString="0"
+                                                                                   Value="{Binding Milliseconds, Mode=TwoWay}" />
+                                                                    <TextBlock Grid.Column="2" Classes="editor-label"
+                                                                               Text="{loc:Tr MacroEditor_Ms}" Margin="8,0,0,0" />
+                                                                </Grid>
+                                                            </DataTemplate>
+
+                                                            <DataTemplate DataType="{x:Type macros:KeyDownStep}">
+                                                                <StackPanel Spacing="4">
+                                                                    <Grid ColumnDefinitions="Auto,*,Auto,Auto">
+                                                                        <TextBlock Grid.Column="0" Classes="editor-label lead"
+                                                                                   Text="{loc:Tr MacroEditor_Key}" Margin="0,0,10,0" />
+                                                                        <TextBox Grid.Column="1"
+                                                                                 Text="{Binding Key, Mode=TwoWay}" />
+                                                                        <ToggleButton Grid.Column="2" Margin="8,0,0,0"
+                                                                                      Content="{loc:Tr MacroEditor_Capture}"
+                                                                                      ToolTip.Tip="{loc:Tr MacroEditor_PressAKeyToAssign}"
+                                                                                      IsCheckedChanged="CaptureToggle_IsCheckedChanged"
+                                                                                      KeyDown="Capture_KeyDown"
+                                                                                      KeyUp="Capture_KeyUp"
+                                                                                      LostFocus="Capture_LostFocus" />
+                                                                        <Button Grid.Column="3" Classes="row-action" Margin="6,0,0,0"
+                                                                                FontFamily="{StaticResource MdiFont}"
+                                                                                Content="&#xF02FD;"
+                                                                                ToolTip.Tip="{loc:Tr MacroEditor_ShowTheUsableKeyNames}"
+                                                                                Click="KeyReference_Click" />
+                                                                    </Grid>
+                                                                    <TextBlock Classes="hint"
+                                                                               Text="{loc:Tr MacroEditor_SingleKeyNameToHold}" />
+                                                                </StackPanel>
+                                                            </DataTemplate>
+
+                                                            <DataTemplate DataType="{x:Type macros:KeyUpStep}">
+                                                                <StackPanel Spacing="4">
+                                                                    <Grid ColumnDefinitions="Auto,*,Auto,Auto">
+                                                                        <TextBlock Grid.Column="0" Classes="editor-label lead"
+                                                                                   Text="{loc:Tr MacroEditor_Key}" Margin="0,0,10,0" />
+                                                                        <TextBox Grid.Column="1"
+                                                                                 Text="{Binding Key, Mode=TwoWay}" />
+                                                                        <ToggleButton Grid.Column="2" Margin="8,0,0,0"
+                                                                                      Content="{loc:Tr MacroEditor_Capture}"
+                                                                                      ToolTip.Tip="{loc:Tr MacroEditor_PressAKeyToAssign}"
+                                                                                      IsCheckedChanged="CaptureToggle_IsCheckedChanged"
+                                                                                      KeyDown="Capture_KeyDown"
+                                                                                      KeyUp="Capture_KeyUp"
+                                                                                      LostFocus="Capture_LostFocus" />
+                                                                        <Button Grid.Column="3" Classes="row-action" Margin="6,0,0,0"
+                                                                                FontFamily="{StaticResource MdiFont}"
+                                                                                Content="&#xF02FD;"
+                                                                                ToolTip.Tip="{loc:Tr MacroEditor_ShowTheUsableKeyNames}"
+                                                                                Click="KeyReference_Click" />
+                                                                    </Grid>
+                                                                    <TextBlock Classes="hint"
+                                                                               Text="{loc:Tr MacroEditor_SingleKeyNameToRelease}" />
+                                                                </StackPanel>
+                                                            </DataTemplate>
+
+                                                            <DataTemplate DataType="{x:Type macros:MouseStep}">
+                                                                <StackPanel Spacing="6">
+                                                                    <Grid ColumnDefinitions="Auto,180,20,Auto,180">
+                                                                        <TextBlock Grid.Column="0" Classes="editor-label lead"
+                                                                                   Text="{loc:Tr MacroEditor_Action}" Margin="0,0,10,0" />
+                                                                        <ComboBox Grid.Column="1"
+                                                                                  HorizontalAlignment="Stretch"
+                                                                                  ItemsSource="{x:Static macros:MouseStep.AllActions}"
+                                                                                  SelectedItem="{Binding Action, Mode=TwoWay}" />
+                                                                        <TextBlock Grid.Column="3" Classes="editor-label"
+                                                                                   Text="{loc:Tr MacroEditor_Button}" Margin="0,0,10,0"
+                                                                                   IsVisible="{Binding ShowsButton}" />
+                                                                        <ComboBox Grid.Column="4"
+                                                                                  HorizontalAlignment="Stretch"
+                                                                                  ItemsSource="{x:Static macros:MouseStep.AllButtons}"
+                                                                                  SelectedItem="{Binding Button, Mode=TwoWay}"
+                                                                                  IsVisible="{Binding ShowsButton}" />
+                                                                    </Grid>
+                                                                    <Grid ColumnDefinitions="Auto,140,20,Auto,140"
+                                                                          IsVisible="{Binding ShowsCoordinates}">
+                                                                        <TextBlock Grid.Column="0" Classes="editor-label lead"
+                                                                                   Text="X" Margin="0,0,10,0" />
+                                                                        <NumericUpDown Grid.Column="1"
+                                                                                       Minimum="-100000" Maximum="100000"
+                                                                                       Increment="10" FormatString="0"
+                                                                                       Value="{Binding X, Mode=TwoWay}" />
+                                                                        <TextBlock Grid.Column="3" Classes="editor-label"
+                                                                                   Text="Y" Margin="0,0,10,0" />
+                                                                        <NumericUpDown Grid.Column="4"
+                                                                                       Minimum="-100000" Maximum="100000"
+                                                                                       Increment="10" FormatString="0"
+                                                                                       Value="{Binding Y, Mode=TwoWay}" />
+                                                                    </Grid>
+                                                                    <Grid ColumnDefinitions="Auto,140,Auto"
+                                                                          IsVisible="{Binding ShowsAmount}">
+                                                                        <TextBlock Grid.Column="0" Classes="editor-label lead"
+                                                                                   Text="{loc:Tr MacroEditor_Amount}" Margin="0,0,10,0" />
+                                                                        <NumericUpDown Grid.Column="1"
+                                                                                       Minimum="-100" Maximum="100"
+                                                                                       Increment="1" FormatString="0"
+                                                                                       Value="{Binding Amount, Mode=TwoWay}" />
+                                                                        <TextBlock Grid.Column="2" Classes="editor-label"
+                                                                                   Text="{loc:Tr MacroEditor_WheelDetentsUpDown}"
+                                                                                   Margin="8,0,0,0" />
+                                                                    </Grid>
+                                                                    <TextBlock Classes="hint"
+                                                                               IsVisible="{Binding ShowsAbsoluteHint}"
+                                                                               Text="{loc:Tr MacroEditor_AbsolutePositioningIsNotSupported}" />
+                                                                </StackPanel>
+                                                            </DataTemplate>
+
+                                                            <DataTemplate DataType="{x:Type macros:CommandStep}">
+                                                                <StackPanel Spacing="6">
+                                                                    <Grid ColumnDefinitions="Auto,*">
+                                                                        <TextBlock Grid.Column="0" Classes="editor-label lead"
+                                                                                   Text="{loc:Tr MacroEditor_Command}" Margin="0,0,10,0" />
+                                                                        <TextBox Grid.Column="1"
+                                                                                 Text="{Binding CommandString, Mode=TwoWay}" />
+                                                                    </Grid>
+                                                                    <TextBlock Classes="hint"
+                                                                               Text="{loc:Tr MacroEditor_ALoupixDeckSystemCommandOr}" />
+                                                                    <Expander Header="{loc:Tr MacroEditor_SystemCommands}">
+                                                                        <TreeView MaxHeight="240"
+                                                                                  Tag="{Binding}"
+                                                                                  ItemsSource="{Binding $parent[Window].((vm:MacroEditorViewModel)DataContext).SystemCommandMenus}">
+                                                                            <TreeView.DataTemplates>
+                                                                                <TreeDataTemplate DataType="{x:Type models:MenuEntry}"
+                                                                                                  ItemsSource="{Binding Children}">
+                                                                                    <StackPanel Orientation="Horizontal"
+                                                                                                PointerPressed="CommandTree_PointerPressed">
+                                                                                        <TextBlock Text="{Binding Name}" />
+                                                                                        <TextBlock Text="{loc:Tr MacroEditor_Loading}" Margin="6,0,0,0"
+                                                                                                   Foreground="{DynamicResource AppTextMuted}" FontStyle="Italic"
+                                                                                                   IsVisible="{Binding IsLoading}" />
+                                                                                    </StackPanel>
+                                                                                </TreeDataTemplate>
+                                                                            </TreeView.DataTemplates>
+                                                                        </TreeView>
+                                                                    </Expander>
+                                                                </StackPanel>
+                                                            </DataTemplate>
+
+                                                            <DataTemplate DataType="{x:Type macros:RepeatStartStep}">
+                                                                <StackPanel Spacing="6">
+                                                                    <Grid ColumnDefinitions="Auto,120,150,Auto,Auto,140,Auto">
+                                                                        <TextBlock Grid.Column="0" Classes="editor-label lead"
+                                                                                   Text="{loc:Tr MacroEditor_Repeat}" Margin="0,0,10,0" />
+                                                                        <ComboBox Grid.Column="1"
+                                                                                  HorizontalAlignment="Stretch"
+                                                                                  ItemsSource="{x:Static macros:RepeatStartStep.AllModes}"
+                                                                                  SelectedItem="{Binding Mode, Mode=TwoWay}" />
+                                                                        <NumericUpDown Grid.Column="2" Margin="10,0,0,0"
+                                                                                       Minimum="1" Maximum="100000"
+                                                                                       Increment="1" FormatString="0"
+                                                                                       IsVisible="{Binding IsFixed}"
+                                                                                       Value="{Binding Count, Mode=TwoWay}" />
+                                                                        <TextBox Grid.Column="2" Margin="10,0,0,0"
+                                                                                 PlaceholderText="repeatCount"
+                                                                                 ToolTip.Tip="{loc:Tr MacroEditor_VariableNameOrNameHolding}"
+                                                                                 IsVisible="{Binding IsVariableCount}"
+                                                                                 Text="{Binding CountVariable, Mode=TwoWay}" />
+                                                                        <TextBlock Grid.Column="3" Classes="editor-label"
+                                                                                   Text="{loc:Tr MacroEditor_Times}" Margin="8,0,20,0"
+                                                                                   IsVisible="{Binding !IsInfinite}" />
+                                                                        <TextBlock Grid.Column="4" Classes="editor-label"
+                                                                                   Text="{loc:Tr MacroEditor_LoopDelay}" Margin="0,0,10,0" />
+                                                                        <NumericUpDown Grid.Column="5"
+                                                                                       Minimum="0" Maximum="600000"
+                                                                                       Increment="50" FormatString="0"
+                                                                                       Value="{Binding LoopDelayMilliseconds, Mode=TwoWay}" />
+                                                                        <TextBlock Grid.Column="6" Classes="editor-label"
+                                                                                   Text="{loc:Tr MacroEditor_Ms}" Margin="8,0,0,0" />
+                                                                    </Grid>
+                                                                    <TextBlock Classes="hint"
+                                                                               Text="{loc:Tr MacroEditor_StepsUpToTheMatching}" />
+                                                                </StackPanel>
+                                                            </DataTemplate>
+
+                                                            <DataTemplate DataType="{x:Type macros:RepeatEndStep}">
+                                                                <TextBlock Classes="hint"
+                                                                           Text="{loc:Tr MacroEditor_EndsTheBlockOpenedBy}" />
+                                                            </DataTemplate>
+
+                                                            <DataTemplate DataType="{x:Type macros:SetVariableStep}">
+                                                                <StackPanel Spacing="4">
+                                                                    <Grid ColumnDefinitions="Auto,160,Auto,150,Auto,*">
+                                                                        <TextBlock Grid.Column="0" Classes="editor-label lead"
+                                                                                   Text="{loc:Tr MacroEditor_Name}" Margin="0,0,10,0" />
+                                                                        <TextBox Grid.Column="1"
+                                                                                 Text="{Binding Name, Mode=TwoWay}" />
+                                                                        <ComboBox Grid.Column="3" Margin="10,0,0,0"
+                                                                                  HorizontalAlignment="Stretch"
+                                                                                  ItemsSource="{x:Static macros:SetVariableStep.AllOperations}"
+                                                                                  SelectedItem="{Binding Operation, Mode=TwoWay}" />
+                                                                        <TextBlock Grid.Column="4" Classes="editor-label"
+                                                                                   Text="{loc:Tr MacroEditor_Value}" Margin="10,0,10,0" />
+                                                                        <TextBox Grid.Column="5"
+                                                                                 Text="{Binding Value, Mode=TwoWay}" />
+                                                                    </Grid>
+                                                                    <TextBlock Classes="hint"
+                                                                               Text="{loc:Tr MacroEditor_StoresAValueForThis}" />
+                                                                </StackPanel>
+                                                            </DataTemplate>
+
+                                                            <DataTemplate DataType="{x:Type macros:IfStep}">
+                                                                <StackPanel Spacing="4" DataContext="{Binding Condition}">
+                                                                    <Grid ColumnDefinitions="Auto,190,Auto,*">
+                                                                        <TextBlock Grid.Column="0" Classes="editor-label lead"
+                                                                                   Text="{loc:Tr MacroEditor_If}" Margin="0,0,10,0" />
+                                                                        <ComboBox Grid.Column="1"
+                                                                                  HorizontalAlignment="Stretch"
+                                                                                  ItemsSource="{x:Static macros:MacroCondition.AllTypes}"
+                                                                                  SelectedItem="{Binding Type, Mode=TwoWay}">
+                                                                            <ComboBox.ItemTemplate>
+                                                                                <DataTemplate x:DataType="macros:ConditionType">
+                                                                                    <TextBlock Text="{Binding Converter={StaticResource ConditionTypeLabel}}" />
+                                                                                </DataTemplate>
+                                                                            </ComboBox.ItemTemplate>
+                                                                        </ComboBox>
+                                                                        <CheckBox Grid.Column="2" Content="{loc:Tr MacroEditor_Negate}" Margin="14,0,10,0"
+                                                                                  ToolTip.Tip="{loc:Tr MacroEditor_InvertTheTestTrueBecomes}"
+                                                                                  IsChecked="{Binding Negate, Mode=TwoWay}" />
+                                                                        <TextBox Grid.Column="3"
+                                                                                 IsVisible="{Binding HasTarget}"
+                                                                                 PlaceholderText="{Binding TargetLabel}"
+                                                                                 Text="{Binding Target, Mode=TwoWay}" />
+                                                                    </Grid>
+                                                                    <Grid ColumnDefinitions="Auto,170,Auto,*"
+                                                                          IsVisible="{Binding IsVariable}">
+                                                                        <TextBlock Grid.Column="0" Classes="editor-label lead"
+                                                                                   Text="{loc:Tr MacroEditor_Compare}" Margin="0,0,10,0" />
+                                                                        <ComboBox Grid.Column="1"
+                                                                                  HorizontalAlignment="Stretch"
+                                                                                  ItemsSource="{x:Static macros:MacroCondition.AllOperators}"
+                                                                                  SelectedItem="{Binding Operator, Mode=TwoWay}" />
+                                                                        <TextBlock Grid.Column="2" Classes="editor-label"
+                                                                                   Text="{loc:Tr MacroEditor_Value}" Margin="14,0,10,0" />
+                                                                        <TextBox Grid.Column="3"
+                                                                                 Text="{Binding Operand, Mode=TwoWay}" />
+                                                                    </Grid>
+                                                                    <TextBlock Classes="hint"
+                                                                               Text="{loc:Tr MacroEditor_RunsTheStepsUpTo}" />
+                                                                </StackPanel>
+                                                            </DataTemplate>
+
+                                                            <DataTemplate DataType="{x:Type macros:ElseStep}">
+                                                                <TextBlock Classes="hint"
+                                                                           Text="{loc:Tr MacroEditor_SeparatesTheTrueAndFalse}" />
+                                                            </DataTemplate>
+
+                                                            <DataTemplate DataType="{x:Type macros:EndIfStep}">
+                                                                <TextBlock Classes="hint"
+                                                                           Text="{loc:Tr MacroEditor_EndsTheBlockOpenedBy2}" />
+                                                            </DataTemplate>
+
+                                                            <DataTemplate DataType="{x:Type macros:PromptStep}">
+                                                                <StackPanel Spacing="4">
+                                                                    <Grid ColumnDefinitions="Auto,*">
+                                                                        <TextBlock Grid.Column="0" Classes="editor-label lead"
+                                                                                   Text="{loc:Tr MacroEditor_Ask}" Margin="0,0,10,0" />
+                                                                        <TextBox Grid.Column="1"
+                                                                                 PlaceholderText="{loc:Tr MacroEditor_PromptShownToTheUser}"
+                                                                                 Text="{Binding Message, Mode=TwoWay}" />
+                                                                    </Grid>
+                                                                    <Grid ColumnDefinitions="Auto,160,Auto,130,Auto,*">
+                                                                        <TextBlock Grid.Column="0" Classes="editor-label lead"
+                                                                                   Text="{loc:Tr MacroEditor_StoreIn}" Margin="0,0,10,0" />
+                                                                        <TextBox Grid.Column="1"
+                                                                                 PlaceholderText="{loc:Tr MacroEditor_VariableName}"
+                                                                                 Text="{Binding VariableName, Mode=TwoWay}" />
+                                                                        <TextBlock Grid.Column="2" Classes="editor-label"
+                                                                                   Text="{loc:Tr MacroEditor_Type}" Margin="14,0,10,0" />
+                                                                        <ComboBox Grid.Column="3"
+                                                                                  HorizontalAlignment="Stretch"
+                                                                                  ItemsSource="{x:Static macros:PromptStep.AllInputTypes}"
+                                                                                  SelectedItem="{Binding InputType, Mode=TwoWay}" />
+                                                                        <TextBlock Grid.Column="4" Classes="editor-label"
+                                                                                   Text="{loc:Tr MacroEditor_Default}" Margin="14,0,10,0" />
+                                                                        <TextBox Grid.Column="5"
+                                                                                 Text="{Binding DefaultValue, Mode=TwoWay}" />
+                                                                    </Grid>
+
+                                                                    <!-- Numeric (Integer / Decimal) restrictions -->
+                                                                    <Grid ColumnDefinitions="Auto,110,Auto,110,Auto,Auto,Auto"
+                                                                          IsVisible="{Binding IsNumericType}">
+                                                                        <TextBlock Grid.Column="0" Classes="editor-label lead"
+                                                                                   Text="{loc:Tr MacroEditor_Min}" Margin="0,0,10,0" />
+                                                                        <NumericUpDown Grid.Column="1"
+                                                                                       Increment="1"
+                                                                                       Value="{Binding Minimum, Mode=TwoWay}" />
+                                                                        <TextBlock Grid.Column="2" Classes="editor-label"
+                                                                                   Text="{loc:Tr MacroEditor_Max}" Margin="14,0,10,0" />
+                                                                        <NumericUpDown Grid.Column="3"
+                                                                                       Increment="1"
+                                                                                       Value="{Binding Maximum, Mode=TwoWay}" />
+                                                                        <CheckBox Grid.Column="4" Content="{loc:Tr MacroEditor_AllowZero}" Margin="14,0,10,0"
+                                                                                  IsChecked="{Binding AllowZero, Mode=TwoWay}" />
+                                                                        <CheckBox Grid.Column="5" Content="{loc:Tr MacroEditor_AllowNegative}" Margin="0,0,10,0"
+                                                                                  IsChecked="{Binding AllowNegative, Mode=TwoWay}" />
+                                                                        <CheckBox Grid.Column="6" Content="{loc:Tr MacroEditor_AllowEmpty}"
+                                                                                  IsChecked="{Binding AllowEmpty, Mode=TwoWay}" />
+                                                                    </Grid>
+
+                                                                    <!-- Text restrictions -->
+                                                                    <Grid ColumnDefinitions="Auto,110,Auto,110,Auto,*,Auto"
+                                                                          IsVisible="{Binding IsTextType}">
+                                                                        <TextBlock Grid.Column="0" Classes="editor-label lead"
+                                                                                   Text="{loc:Tr MacroEditor_MinLen}" Margin="0,0,10,0" />
+                                                                        <NumericUpDown Grid.Column="1"
+                                                                                       Minimum="0" Maximum="100000"
+                                                                                       Increment="1" FormatString="0"
+                                                                                       Value="{Binding MinLength, Mode=TwoWay}" />
+                                                                        <TextBlock Grid.Column="2" Classes="editor-label"
+                                                                                   Text="{loc:Tr MacroEditor_MaxLen}" Margin="14,0,10,0" />
+                                                                        <NumericUpDown Grid.Column="3"
+                                                                                       Minimum="0" Maximum="100000"
+                                                                                       Increment="1" FormatString="0"
+                                                                                       Value="{Binding MaxLength, Mode=TwoWay}" />
+                                                                        <TextBlock Grid.Column="4" Classes="editor-label"
+                                                                                   Text="{loc:Tr MacroEditor_Regex}" Margin="14,0,10,0" />
+                                                                        <TextBox Grid.Column="5"
+                                                                                 PlaceholderText="{loc:Tr MacroEditor_OptionalPattern}"
+                                                                                 Text="{Binding ValidationRegex, Mode=TwoWay}" />
+                                                                        <CheckBox Grid.Column="6" Content="{loc:Tr MacroEditor_AllowEmpty}" Margin="14,0,0,0"
+                                                                                  IsChecked="{Binding AllowEmpty, Mode=TwoWay}" />
+                                                                    </Grid>
+
+                                                                    <!-- Selection restrictions -->
+                                                                    <Grid ColumnDefinitions="Auto,*,Auto"
+                                                                          IsVisible="{Binding IsSelectionType}">
+                                                                        <TextBlock Grid.Column="0" Classes="editor-label lead"
+                                                                                   Text="{loc:Tr MacroEditor_Values}" Margin="0,3,10,0"
+                                                                                   VerticalAlignment="Top" />
+                                                                        <TextBox Grid.Column="1"
+                                                                                 AcceptsReturn="True"
+                                                                                 MinHeight="56"
+                                                                                 TextWrapping="Wrap"
+                                                                                 PlaceholderText="{loc:Tr MacroEditor_OneAllowedValuePerLine}"
+                                                                                 Text="{Binding SelectionItemsText, Mode=TwoWay}" />
+                                                                        <CheckBox Grid.Column="2" Content="{loc:Tr MacroEditor_AllowEmpty}" Margin="14,0,0,0"
+                                                                                  VerticalAlignment="Top"
+                                                                                  IsChecked="{Binding AllowEmpty, Mode=TwoWay}" />
+                                                                    </Grid>
+
+                                                                    <TextBlock Classes="hint"
+                                                                               Text="{loc:Tr MacroEditor_PausesTheMacroAndAsks}" />
+                                                                </StackPanel>
+                                                            </DataTemplate>
+
+                                                            <DataTemplate DataType="{x:Type macros:WaitForConditionStep}">
+                                                                <StackPanel Spacing="4">
+                                                                    <Grid ColumnDefinitions="Auto,190,Auto,*">
+                                                                        <TextBlock Grid.Column="0" Classes="editor-label lead"
+                                                                                   Text="{loc:Tr MacroEditor_Until}" Margin="0,0,10,0" />
+                                                                        <ComboBox Grid.Column="1"
+                                                                                  HorizontalAlignment="Stretch"
+                                                                                  ItemsSource="{x:Static macros:MacroCondition.AllTypes}"
+                                                                                  SelectedItem="{Binding Condition.Type, Mode=TwoWay}">
+                                                                            <ComboBox.ItemTemplate>
+                                                                                <DataTemplate x:DataType="macros:ConditionType">
+                                                                                    <TextBlock Text="{Binding Converter={StaticResource ConditionTypeLabel}}" />
+                                                                                </DataTemplate>
+                                                                            </ComboBox.ItemTemplate>
+                                                                        </ComboBox>
+                                                                        <CheckBox Grid.Column="2" Content="{loc:Tr MacroEditor_Negate}" Margin="14,0,10,0"
+                                                                                  ToolTip.Tip="{loc:Tr MacroEditor_InvertTheTestEG}"
+                                                                                  IsChecked="{Binding Condition.Negate, Mode=TwoWay}" />
+                                                                        <TextBox Grid.Column="3"
+                                                                                 IsVisible="{Binding Condition.HasTarget}"
+                                                                                 PlaceholderText="{Binding Condition.TargetLabel}"
+                                                                                 Text="{Binding Condition.Target, Mode=TwoWay}" />
+                                                                    </Grid>
+                                                                    <Grid ColumnDefinitions="Auto,170,Auto,*"
+                                                                          IsVisible="{Binding Condition.IsVariable}">
+                                                                        <TextBlock Grid.Column="0" Classes="editor-label lead"
+                                                                                   Text="{loc:Tr MacroEditor_Compare}" Margin="0,0,10,0" />
+                                                                        <ComboBox Grid.Column="1"
+                                                                                  HorizontalAlignment="Stretch"
+                                                                                  ItemsSource="{x:Static macros:MacroCondition.AllOperators}"
+                                                                                  SelectedItem="{Binding Condition.Operator, Mode=TwoWay}" />
+                                                                        <TextBlock Grid.Column="2" Classes="editor-label"
+                                                                                   Text="{loc:Tr MacroEditor_Value}" Margin="14,0,10,0" />
+                                                                        <TextBox Grid.Column="3"
+                                                                                 Text="{Binding Condition.Operand, Mode=TwoWay}" />
+                                                                    </Grid>
+                                                                    <Grid ColumnDefinitions="Auto,140,Auto,Auto,120,Auto,Auto,150">
+                                                                        <TextBlock Grid.Column="0" Classes="editor-label lead"
+                                                                                   Text="{loc:Tr MacroEditor_Timeout}" Margin="0,0,10,0" />
+                                                                        <NumericUpDown Grid.Column="1"
+                                                                                       Minimum="0" Maximum="600000"
+                                                                                       Increment="500" FormatString="0"
+                                                                                       Value="{Binding TimeoutMilliseconds, Mode=TwoWay}" />
+                                                                        <TextBlock Grid.Column="2" Classes="editor-label"
+                                                                                   Text="{loc:Tr MacroEditor_Ms}" Margin="8,0,20,0" />
+                                                                        <TextBlock Grid.Column="3" Classes="editor-label"
+                                                                                   Text="{loc:Tr MacroEditor_Poll}" Margin="0,0,10,0" />
+                                                                        <NumericUpDown Grid.Column="4"
+                                                                                       Minimum="10" Maximum="60000"
+                                                                                       Increment="50" FormatString="0"
+                                                                                       Value="{Binding PollIntervalMilliseconds, Mode=TwoWay}" />
+                                                                        <TextBlock Grid.Column="5" Classes="editor-label"
+                                                                                   Text="{loc:Tr MacroEditor_Ms}" Margin="8,0,20,0" />
+                                                                        <TextBlock Grid.Column="6" Classes="editor-label"
+                                                                                   Text="{loc:Tr MacroEditor_OnTimeout}" Margin="0,0,10,0" />
+                                                                        <ComboBox Grid.Column="7"
+                                                                                  HorizontalAlignment="Stretch"
+                                                                                  ItemsSource="{x:Static macros:WaitForConditionStep.AllTimeoutBehaviors}"
+                                                                                  SelectedItem="{Binding OnTimeout, Mode=TwoWay}" />
+                                                                    </Grid>
+                                                                    <TextBlock Classes="hint"
+                                                                               Text="{loc:Tr MacroEditor_PausesUntilTheConditionIs}" />
+                                                                </StackPanel>
+                                                            </DataTemplate>
+
+                                                        </ContentControl.DataTemplates>
+                                                    </ContentControl>
+                                                </Border>
+                                            </Grid>
+                                        </Border>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+
+                            <!-- Empty state -->
+                            <TextBlock Classes="hint"
+                                       Margin="2,4,0,0"
+                                       Text="{loc:Tr MacroEditor_NoStepsYetUseAdd}"
+                                       IsVisible="{Binding !SelectedMacro.Steps.Count}" />
+                        </StackPanel>
+                    </ScrollViewer>
+                </Grid>
+            </Border>
+
+            <!-- Right: full sequence preview (wraps, scrolls) -->
+            <Border Grid.Column="2" Classes="card" Margin="0" Padding="14"
+                    IsVisible="{Binding HasSelectedMacro}">
+                <Grid RowDefinitions="Auto,*">
+                    <TextBlock Grid.Row="0" Classes="card-title" Text="{loc:Tr MacroEditor_Preview}" Margin="0,0,0,8" />
+
+                    <ScrollViewer Grid.Row="1"
+                                  VerticalScrollBarVisibility="Auto"
+                                  HorizontalScrollBarVisibility="Disabled">
+                        <StackPanel VerticalAlignment="Top">
+                            <TextBlock Classes="step-value"
+                                       VerticalAlignment="Top"
+                                       TextWrapping="Wrap"
+                                       LineHeight="22"
+                                       Text="{Binding MacroPreview}"
+                                       IsVisible="{Binding SelectedMacro.Steps.Count}" />
+                            <TextBlock Classes="hint"
+                                       Text="{loc:Tr MacroEditor_NoStepsYet}"
+                                       IsVisible="{Binding !SelectedMacro.Steps.Count}" />
+                        </StackPanel>
+                    </ScrollViewer>
+                </Grid>
+            </Border>
+        </Grid>
+    </Grid>
+</Window>

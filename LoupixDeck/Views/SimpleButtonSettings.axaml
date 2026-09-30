@@ -1,0 +1,377 @@
+﻿<Window
+    x:Class="LoupixDeck.Views.SimpleButtonSettings"
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:loc="using:LoupixDeck.Localization"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:ccp="clr-namespace:Avalonia.Controls;assembly=Avalonia.Controls.ColorPicker"
+    xmlns:local="clr-namespace:LoupixDeck"
+    xmlns:vm="using:LoupixDeck.ViewModels"
+    xmlns:views="using:LoupixDeck.Views"
+    xmlns:conv="clr-namespace:LoupixDeck.Models.Converter"
+    xmlns:models="clr-namespace:LoupixDeck.Models"
+    x:DataType="vm:SimpleButtonSettingsViewModel"
+    Title="{Binding ButtonLabel}"
+    Width="1080"
+    Height="820"
+    MinWidth="900"
+    MinHeight="640"
+    mc:Ignorable="d"
+    CanResize="True">
+
+    <Window.Styles>
+        <StyleInclude Source="avares://LoupixDeck/Views/Styles/SettingsStyles.axaml" />
+    </Window.Styles>
+
+    <Window.Resources>
+        <conv:TransitionKindLabelConverter x:Key="TransitionKindLabel" />
+        <conv:EnumToBooleanConverter x:Key="EnumToBoolean" />
+    </Window.Resources>
+
+    <!-- Single-cell root so the drag-ghost canvas can float over the whole window. -->
+    <Grid>
+        <Grid RowDefinitions="Auto,Auto,*" Margin="12">
+
+            <!-- Title -->
+            <TextBlock Grid.Row="0"
+                       Text="{Binding ButtonLabel}"
+                       FontSize="22" FontWeight="Bold"
+                       Margin="0,0,0,8" />
+
+            <!-- OFF toggle sits directly under the title, above the editor area. -->
+            <CheckBox Grid.Row="1"
+                      Content="{loc:Tr SimpleButton_RunAlsoWhenDeviceIs}"
+                      IsChecked="{Binding ButtonData.EnableWhenOff}"
+                      Margin="0,0,0,8" />
+
+            <!-- Two columns: left = color + assigned command sequence,
+                 right = the command library to pick from. -->
+            <!-- The left column is sized to just fit two command chips per row:
+                 2 x (22 gutter + 210 chip + 6 margin) = 476 of strip content,
+                 + 24 strip padding + 2 strip border + 12 gap to the picker = 514,
+                 rounded up to 536 for a little slack. Everything left over goes
+                 to the picker, which keeps it wider than the rotary editor's. -->
+            <Grid Grid.Row="2" ColumnDefinitions="536,*">
+
+                <!-- Left: States + selected-state behavior on top, the command sequence grows
+                     to fill the remaining height below. -->
+                <Grid Grid.Column="0" RowDefinitions="Auto,Auto,*" Margin="0,0,12,0">
+
+                    <!-- States: compact state management (fixed-height list). -->
+                    <Border Grid.Row="0" Classes="editor-panel" Margin="0,0,0,12">
+                        <StackPanel>
+                            <TextBlock Classes="panel-title" Text="{loc:Tr SimpleButton_States}" />
+                            <UniformGrid Columns="2" Margin="0,0,0,8" IsEnabled="{Binding CanEditStates}">
+                                <Button Classes="toolbar" Content="{loc:Tr SimpleButton_Add}" Margin="0,0,4,0"
+                                        HorizontalAlignment="Stretch"
+                                        Command="{Binding AddStateCommand}"
+                                        ToolTip.Tip="{loc:Tr SimpleButton_AddANewState}" />
+                                <Button Classes="toolbar" Content="{loc:Tr SimpleButton_Duplicate}"
+                                        HorizontalAlignment="Stretch"
+                                        Command="{Binding DuplicateStateCommand}"
+                                        ToolTip.Tip="{loc:Tr SimpleButton_DuplicateTheSelectedState}" />
+                            </UniformGrid>
+
+                            <ListBox Height="108"
+                                     ItemsSource="{Binding States}"
+                                     SelectedItem="{Binding SelectedState, Mode=TwoWay}"
+                                     Background="{DynamicResource AppSurfaceLow}"
+                                     CornerRadius="6">
+                                <ListBox.Styles>
+                                    <Style Selector="ListBoxItem">
+                                        <Setter Property="Padding" Value="8,5" />
+                                        <Setter Property="MinHeight" Value="32" />
+                                    </Style>
+                                </ListBox.Styles>
+                                <ListBox.ItemTemplate>
+                                    <DataTemplate DataType="models:ButtonState">
+                                        <Grid ColumnDefinitions="Auto,*,Auto">
+                                            <TextBlock Grid.Column="0" Text="{Binding DisplayIndex}"
+                                                       VerticalAlignment="Center" Margin="0,0,8,0"
+                                                       Foreground="{DynamicResource AppTextMuted}" />
+                                            <TextBlock Grid.Column="1" Text="{Binding Name}"
+                                                       VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
+                                                       ToolTip.Tip="{Binding Name}" />
+                                            <Border Grid.Column="2" Classes="layer-badge"
+                                                    IsVisible="{Binding IsDefault}"
+                                                    ToolTip.Tip="{loc:Tr SimpleButton_DefaultState}">
+                                                <TextBlock Text="{loc:Tr SimpleButton_Default}" />
+                                            </Border>
+                                        </Grid>
+                                    </DataTemplate>
+                                </ListBox.ItemTemplate>
+                            </ListBox>
+
+                            <StackPanel Orientation="Horizontal" Margin="0,8,0,0" IsEnabled="{Binding CanEditStates}">
+                                <Button Classes="row-action" Content="▲"
+                                        Command="{Binding MoveStateUpCommand}"
+                                        ToolTip.Tip="{loc:Tr SimpleButton_MoveStateUp}" />
+                                <Button Classes="row-action" Content="▼"
+                                        Command="{Binding MoveStateDownCommand}"
+                                        ToolTip.Tip="{loc:Tr SimpleButton_MoveStateDown}" />
+                                <Button Classes="row-action"
+                                        Command="{Binding SetDefaultStateCommand}"
+                                        ToolTip.Tip="{loc:Tr SimpleButton_SetAsDefaultState}">
+                                    <TextBlock Text="&#xF04CE;" FontFamily="{StaticResource MdiFont}" />
+                                </Button>
+                                <Button Classes="row-action danger"
+                                        Command="{Binding DeleteStateCommand}"
+                                        IsEnabled="{Binding CanDeleteState}"
+                                        ToolTip.Tip="{loc:Tr SimpleButton_DeleteTheSelectedState}">
+                                    <TextBlock Text="&#xF01B4;" FontFamily="{StaticResource MdiFont}" />
+                                </Button>
+                            </StackPanel>
+
+                            <!-- The assigned command owns these states: it created them and its plugin
+                                 decides which one is active. -->
+                            <TextBlock Classes="label" Margin="0,8,0,0" TextWrapping="Wrap"
+                                       IsVisible="{Binding AreStatesLocked}"
+                                       Text="{loc:Tr SimpleButton_StatesAreManagedByThe}" />
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Selected state: name, LED color, transition, reset rule. -->
+                    <Border Grid.Row="1" Classes="editor-panel" Margin="0,0,0,12">
+                        <StackPanel>
+                            <TextBlock Classes="panel-title"
+                                       Text="{loc:TrFormat Common_BehaviorForStateFmt, SelectedState.Name}" />
+
+                            <TextBlock Classes="label" Text="{loc:Tr SimpleButton_Name}" />
+                            <TextBox Text="{Binding SelectedState.Name, Mode=TwoWay}" Margin="0,2,0,8"
+                                     IsEnabled="{Binding CanEditStates}" />
+
+                            <TextBlock Classes="label" Text="{loc:Tr SimpleButton_LEDColor}" />
+                            <ccp:ColorPicker Width="120" HorizontalAlignment="Left" Margin="0,2,0,8"
+                                             Color="{Binding ButtonData.ButtonColor}" />
+
+                            <TextBlock Classes="label" Text="{loc:Tr SimpleButton_TransitionAfterPress}" />
+                            <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,2,0,8"
+                                        IsEnabled="{Binding CanEditStates}">
+                                <ComboBox MinWidth="200"
+                                          ItemsSource="{Binding TransitionKinds}"
+                                          SelectedItem="{Binding SelectedState.Transition.Kind, Mode=TwoWay}">
+                                    <ComboBox.ItemTemplate>
+                                        <DataTemplate x:DataType="models:StateTransitionKind">
+                                            <TextBlock Text="{Binding Converter={StaticResource TransitionKindLabel}}" />
+                                        </DataTemplate>
+                                    </ComboBox.ItemTemplate>
+                                </ComboBox>
+                                <ComboBox MinWidth="160"
+                                          IsVisible="{Binding SelectedState.Transition.Kind, Converter={StaticResource EnumToBoolean}, ConverterParameter=Specific}"
+                                          ItemsSource="{Binding States}"
+                                          SelectedValueBinding="{Binding Id}"
+                                          SelectedValue="{Binding SelectedState.Transition.TargetStateId, Mode=TwoWay}"
+                                          DisplayMemberBinding="{Binding Name}" />
+                            </StackPanel>
+
+                            <CheckBox Content="{loc:Tr SimpleButton_ResetToDefaultOnRestart}"
+                                      IsChecked="{Binding ResetOnRestart, Mode=TwoWay}"
+                                      IsEnabled="{Binding CanEditStates}" />
+                        </StackPanel>
+                    </Border>
+
+                    <!-- ===== Command sequence pipeline strip =====
+                         The assigned commands as an execution chain. Chips wrap
+                         onto more rows and the strip scrolls vertically — adding
+                         commands never reflows the rest of the window. Doubles as
+                         the drop target for tree drags. -->
+                    <Border Grid.Row="2" Name="CommandDropZone"
+                            Classes="sequence-strip">
+                        <Grid RowDefinitions="Auto,*">
+
+                            <Grid Grid.Row="0" ColumnDefinitions="*,Auto" Margin="0,0,0,8">
+                                <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                                    <TextBlock Text="{loc:Tr SimpleButton_Sequence}" FontWeight="SemiBold" />
+                                    <TextBlock Classes="hint"
+                                               Text="{loc:TrFormat Common_CommandCountFmt, Commands.Count}" />
+                                </StackPanel>
+                                <Button Grid.Column="1" Content="{loc:Tr SimpleButton_Clear}"
+                                        Command="{Binding ClearCommandCommand}"
+                                        IsEnabled="{Binding HasCommand}"
+                                        VerticalAlignment="Center"
+                                        MinWidth="80"
+                                        HorizontalContentAlignment="Center"
+                                        ToolTip.Tip="{loc:Tr SimpleButton_RemoveAllAssignedCommandsKeeps}" />
+                            </Grid>
+
+                            <Panel Grid.Row="1" MinHeight="40">
+                                <ScrollViewer HorizontalScrollBarVisibility="Disabled"
+                                              VerticalScrollBarVisibility="Auto">
+                                    <ItemsControl Name="CommandList"
+                                                  ItemsSource="{Binding Commands}"
+                                                  VerticalAlignment="Top"
+                                                  PointerMoved="CommandList_PointerMoved"
+                                                  PointerReleased="CommandList_PointerReleased"
+                                                  PointerCaptureLost="CommandList_PointerCaptureLost">
+                                        <ItemsControl.ItemsPanel>
+                                            <ItemsPanelTemplate>
+                                                <!-- Chips wrap onto multiple rows; the chain
+                                                     still reads left → right, top → bottom in
+                                                     execution order. -->
+                                                <WrapPanel Orientation="Horizontal" />
+                                            </ItemsPanelTemplate>
+                                        </ItemsControl.ItemsPanel>
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate DataType="{x:Type vm:CommandSegment}">
+                                                <!-- Connector gutter + chip. The arrow lives in a
+                                                     fixed-width gutter so showing/hiding it never
+                                                     re-packs the row; it is hidden on the first chip
+                                                     of each wrapped row (ShowConnector, maintained
+                                                     from layout in code-behind), which keeps every
+                                                     row left-aligned. -->
+                                                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                                    <Panel Width="22">
+                                                        <TextBlock Classes="sequence-arrow" Text="&#x2192;"
+                                                                   HorizontalAlignment="Center"
+                                                                   VerticalAlignment="Center"
+                                                                   IsVisible="{Binding ShowConnector}" />
+                                                    </Panel>
+                                                    <Border Classes="command-chip"
+                                                            Classes.dragging="{Binding IsDragging}"
+                                                            ToolTip.Tip="{Binding DisplayName}">
+                                                        <Grid ColumnDefinitions="Auto,Auto,*,Auto,Auto">
+                                                            <Border Grid.Column="0" Classes="drag-handle chip-grip"
+                                                                    VerticalAlignment="Center"
+                                                                    ToolTip.Tip="{loc:Tr SimpleButton_DragToReorder}"
+                                                                    PointerPressed="CommandDragHandle_PointerPressed">
+                                                                <TextBlock Text="&#xF01DB;" />
+                                                            </Border>
+
+                                                            <Border Grid.Column="1" Classes="chip-index"
+                                                                    VerticalAlignment="Center">
+                                                                <TextBlock Text="{Binding Position}" />
+                                                            </Border>
+
+                                                            <TextBlock Grid.Column="2" Classes="chip-title"
+                                                                       Text="{Binding DisplayName}"
+                                                                       VerticalAlignment="Center" />
+
+                                                            <Button Grid.Column="3" Classes="chip-action"
+                                                                    VerticalAlignment="Center"
+                                                                    FontFamily="{StaticResource MdiFont}"
+                                                                    Content="&#xF0140;"
+                                                                    ToolTip.Tip="{loc:Tr SimpleButton_EditParameters}">
+                                                                <Button.Flyout>
+                                                                    <Flyout Placement="Top">
+                                                                        <Panel Width="300">
+                                                                            <!-- Known command: structured parameter fields -->
+                                                                            <StackPanel Spacing="4"
+                                                                                        IsVisible="{Binding IsKnown}">
+                                                                                <ItemsControl ItemsSource="{Binding Parameters}">
+                                                                                    <ItemsControl.ItemTemplate>
+                                                                                        <DataTemplate DataType="{x:Type vm:CommandParameter}">
+                                                                                            <Grid ColumnDefinitions="120,*"
+                                                                                                  Margin="0,0,0,4">
+                                                                                                <TextBlock Grid.Column="0"
+                                                                                                           Classes="editor-label"
+                                                                                                           Text="{Binding DisplayName}"
+                                                                                                           VerticalAlignment="Center"
+                                                                                                           Margin="0,0,10,0" />
+                                                                                                <TextBox Grid.Column="1"
+                                                                                                         Text="{Binding Value, Mode=TwoWay}"
+                                                                                                         IsVisible="{Binding IsText}">
+                                                                                                    <TextBox.InnerRightContent>
+                                                                                                        <!-- Record the value by pressing the keys instead of typing their names. -->
+                                                                                                        <Button Classes="chip-action"
+                                                                                                                Margin="0,0,4,0"
+                                                                                                                FontFamily="{StaticResource MdiFont}"
+                                                                                                                Content="&#xF030C;"
+                                                                                                                IsVisible="{Binding HasPicker}"
+                                                                                                                Command="{Binding PickCommand}"
+                                                                                                                ToolTip.Tip="{Binding PickerHint}" />
+                                                                                                    </TextBox.InnerRightContent>
+                                                                                                </TextBox>
+                                                                                                <ComboBox Grid.Column="1"
+                                                                                                          HorizontalAlignment="Stretch"
+                                                                                                          ItemsSource="{Binding Options}"
+                                                                                                          SelectedItem="{Binding Value, Mode=TwoWay}"
+                                                                                                          IsVisible="{Binding IsEnum}" />
+                                                                                                <CheckBox Grid.Column="1"
+                                                                                                          IsChecked="{Binding BoolValue, Mode=TwoWay}"
+                                                                                                          IsVisible="{Binding IsBool}" />
+                                                                                            </Grid>
+                                                                                        </DataTemplate>
+                                                                                    </ItemsControl.ItemTemplate>
+                                                                                </ItemsControl>
+                                                                                <TextBlock Classes="hint"
+                                                                                           Text="{loc:Tr SimpleButton_ThisCommandHasNoParameters}"
+                                                                                           IsVisible="{Binding !Parameters.Count}" />
+                                                                            </StackPanel>
+
+                                                                            <!-- Unknown / shell command: single free-text field -->
+                                                                            <Grid ColumnDefinitions="120,*" RowDefinitions="Auto,Auto"
+                                                                                  IsVisible="{Binding !IsKnown}">
+                                                                                <TextBlock Grid.Column="0"
+                                                                                           Classes="editor-label"
+                                                                                           Text="{loc:Tr SimpleButton_Command}"
+                                                                                           VerticalAlignment="Center"
+                                                                                           Margin="0,0,10,0" />
+                                                                                <TextBox Grid.Column="1"
+                                                                                         Text="{Binding ShellText, Mode=TwoWay}" />
+                                                                                <TextBlock Grid.Row="1" Grid.Column="1" Margin="0,6,0,0"
+                                                                                           TextWrapping="Wrap" MaxWidth="360" HorizontalAlignment="Left"
+                                                                                           Classes="editor-label"
+                                                                                           Text="{Binding UnavailableHint}"
+                                                                                           IsVisible="{Binding IsUnavailable}" />
+                                                                            </Grid>
+                                                                        </Panel>
+                                                                    </Flyout>
+                                                                </Button.Flyout>
+                                                            </Button>
+
+                                                            <Button Grid.Column="4" Classes="chip-action danger"
+                                                                    VerticalAlignment="Center"
+                                                                    FontFamily="{StaticResource MdiFont}"
+                                                                    Content="&#xF01B4;"
+                                                                    ToolTip.Tip="{loc:Tr SimpleButton_RemoveCommand}"
+                                                                    Click="RemoveCommand_Click" />
+                                                        </Grid>
+                                                    </Border>
+                                                </StackPanel>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                </ScrollViewer>
+
+                                <TextBlock Classes="hint" VerticalAlignment="Center"
+                                           Text="{loc:Tr SimpleButton_NoCommandsYetDoubleClick}"
+                                           IsVisible="{Binding !Commands.Count}" />
+                            </Panel>
+                        </Grid>
+                    </Border>
+                </Grid>
+
+                <!-- Right: master-detail command picker, full height (issue #171) -->
+                <Border Grid.Column="1"
+                        BorderBrush="{DynamicResource AppBorderSubtle}" BorderThickness="1" CornerRadius="4"
+                        Padding="4">
+                    <views:CommandPickerView Name="PickerControl"
+                                             DataContext="{Binding CommandPicker}" />
+                </Border>
+            </Grid>
+        </Grid>
+
+        <!-- ===== Drag ghost =====
+             Floating chip that follows the cursor while dragging a command from
+             the tree into the sequence strip. Spans the whole window, never hit-
+             tests, and is positioned from code-behind during the drag. -->
+        <Canvas Name="DragGhostLayer"
+                IsHitTestVisible="False" IsVisible="False">
+            <!-- Insertion marker: vertical bar shown at the slot where the
+                 dragged command will land. Positioned from code-behind. -->
+            <Rectangle Name="DropMarker" Width="3"
+                       Fill="#4DA3FF" RadiusX="1.5" RadiusY="1.5"
+                       IsVisible="False" />
+            <Border Name="DragGhost" Classes="drag-ghost">
+                <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                    <TextBlock Text="&#xF01DB;" FontFamily="{StaticResource MdiFont}"
+                               FontSize="16" VerticalAlignment="Center"
+                               Foreground="{DynamicResource AppTextMuted}" />
+                    <TextBlock Name="DragGhostText" Classes="chip-title"
+                               VerticalAlignment="Center" />
+                </StackPanel>
+            </Border>
+        </Canvas>
+    </Grid>
+</Window>

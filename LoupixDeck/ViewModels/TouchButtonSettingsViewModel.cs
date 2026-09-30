@@ -1,0 +1,1560 @@
+﻿using LoupixDeck.Localization;
+using System.Collections.ObjectModel;
+using CommunityToolkit.Mvvm.Input;
+using LoupixDeck.Models;
+using LoupixDeck.Models.Converter;
+using LoupixDeck.Models.Layers;
+using LoupixDeck.PluginSdk;
+using LoupixDeck.Registry;
+using LoupixDeck.Services;
+using LoupixDeck.Services.Actions;
+using LoupixDeck.Services.Commands;
+using LoupixDeck.Services.IconPacks;
+using LoupixDeck.Services.Plugins;
+using LoupixDeck.Utils;
+using LoupixDeck.ViewModels.Base;
+using LoupixDeck.ViewModels.CommandPicker;
+using SkiaSharp;
+
+namespace LoupixDeck.ViewModels;
+
+public partial class TouchButtonSettingsViewModel : DialogViewModelBase<TouchButton, DialogResult>, IAsyncInitViewModel
+
+{
+    public override void Initialize(TouchButton parameter)
+    {
+        if (ButtonData != null)
+        {
+            ButtonData.ItemChanged -= ButtonData_ItemChanged;
+            ButtonData.PropertyChanged -= ButtonData_PropertyChanged;
+        }
+
+        ButtonData = parameter;
+
+        if (ButtonData != null)
+        {
+            ButtonData.ItemChanged += ButtonData_ItemChanged;
+            ButtonData.PropertyChanged += ButtonData_PropertyChanged;
+
+            // Remember the runtime active state and start editing it; restored on Cleanup so the
+            // editor's state-switching does not leave the button on a non-default state at runtime.
+            _originalActiveStateId = ButtonData.ActiveStateId;
+            ApplyDeviceBaseToLayers();
+            RefreshStateBadges();
+            SelectedState = ButtonData.ActiveState;
+
+            SeedAnimatedLayerPreviews();
+            UpdateEditorPreview();
+
+            _selectedVibrationPattern = VibrationPatterns.FirstOrDefault(
+                p => p.Value == ButtonData.VibrationPattern);
+            OnPropertyChanged(nameof(SelectedVibrationPattern));
+        }
+
+        BuildCommandSlots();
+
+        OnPropertyChanged(nameof(States));
+        OnPropertyChanged(nameof(BackgroundEnabled));
+        OnPropertyChanged(nameof(AreStatesLocked));
+        OnPropertyChanged(nameof(CanEditStates));
+        OnPropertyChanged(nameof(CanDeleteState));
+        OnPropertyChanged(nameof(ResetOnPageChange));
+        OnPropertyChanged(nameof(ResetOnRestart));
+        OnPropertyChanged(nameof(ButtonNumber));
+        OnPropertyChanged(nameof(ButtonLabel));
+    }
+
+    private readonly ICommandBuilder _commandBuilder;
+    private readonly IMenuTreeBuilder _menuTreeBuilder;
+    private readonly ICommandRegistry _commandRegistry;
+    private readonly Services.Companion.ICommandLockService _commandLock;
+    private readonly Services.Commands.ICommandStateMaterializer _stateMaterializer;
+    private readonly IAssetService _assetService;
+    private readonly IDialogService _dialogService;
+    private readonly ISideStripProviderRegistry _sideStripRegistry;
+    private readonly IDynamicTextManager _dynamicTextManager;
+    private readonly Services.Animation.IButtonAnimationManager _buttonAnimationManager;
+    private readonly Services.Animation.IAnimatedImageImporter _animatedImageImporter;
+    private readonly Services.Animation.IAnimatedImageCache _animatedImageCache;
+    private readonly Services.AppLauncher.IAppIconExtractor _appIcons;
+    private readonly LoupedeckConfig _config;
+
+    /// <summary>
+    /// Smallest working margin (canvas px) kept around the frame on every side, so a
+    /// layer dragged past the button edge stays visible and grabbable. The canvas grows
+    /// past this to fill the viewport — see <see cref="EditorCanvasWidth"/>.
+    /// </summary>
+    public const int EditorCanvasBleed = 75;
+
+    // Device-pixel dimensions of the edited surface. 90×90 for grid touch buttons;
+    /// <summary>False on a device without a haptic motor — the per-button vibration
+    /// controls are hidden rather than shown doing nothing.</summary>
+    public bool IsVibrationSupported { get; }
+
+    // set to the side-strip size for a Razer free-draw canvas via SetCanvasSize.
+    public int DeviceWidth { get; private set; } = DeviceGeometry.Default.KeySize;
+    public int DeviceHeight { get; private set; } = DeviceGeometry.Default.KeySize;
+
+    /// <summary>Editor → device coordinate factor (canvas pixels per device pixel).</summary>
+    public double EditorToDeviceScale => BitmapHelper.ComputeEditorFrame(DeviceWidth, DeviceHeight).Scale;
+
+    /// <summary>Rendered frame size (canvas px), aspect-correct for the device surface.</summary>
+    public double FrameWidth => BitmapHelper.ComputeEditorFrame(DeviceWidth, DeviceHeight).FrameWidth;
+    public double FrameHeight => BitmapHelper.ComputeEditorFrame(DeviceWidth, DeviceHeight).FrameHeight;
+
+    /// <summary>
+    /// Editor canvas size (canvas px): the frame plus at least <see cref="EditorCanvasBleed"/>
+    /// on each side, grown to fill the preview viewport at the current zoom. Filling the
+    /// viewport is what keeps the panel free of dead grey bars around the canvas — every
+    /// pixel the user sees is drawable, so a layer dragged off the button stays visible
+    /// instead of vanishing where the canvas ended.
+    /// </summary>
+    public int EditorCanvasWidth => CanvasExtent(FrameWidth, _viewport.Width);
+    public int EditorCanvasHeight => CanvasExtent(FrameHeight, _viewport.Height);
+
+    private int CanvasExtent(double frameExtent, double viewportExtent)
+    {
+        double minimum = frameExtent + (2.0 * EditorCanvasBleed);
+
+        // Floor, so the zoomed content never exceeds the viewport by a rounding pixel and
+        // trips the scrollbar. The viewport is only known once the View has measured.
+        //
+        // The zoom divisor is clamped at 1 so zooming out cannot inflate the canvas — and
+        // with it the rendered bitmap, which is re-rendered on every drag step — past the
+        // panel's own size. Below 100% the canvas therefore stays put and the view simply
+        // shows the workspace smaller.
+        double fill = viewportExtent > 0
+            ? Math.Floor(viewportExtent / Math.Max(1.0, ZoomFactor))
+            : 0;
+
+        return (int)Math.Round(Math.Max(minimum, fill));
+    }
+
+    /// <summary>Top-left of the centered frame inside the editor canvas.</summary>
+    public double FrameOffsetX => (EditorCanvasWidth - FrameWidth) / 2.0;
+    public double FrameOffsetY => (EditorCanvasHeight - FrameHeight) / 2.0;
+
+    /// <summary>
+    /// Sets the edited surface's device-pixel dimensions (e.g. the side-strip size for a
+    /// free-draw canvas). Call before <see cref="Initialize"/>. Defaults to the attached
+    /// device's key size.
+    /// </summary>
+    public void SetCanvasSize(int deviceWidth, int deviceHeight)
+    {
+        DeviceWidth = Math.Max(1, deviceWidth);
+        DeviceHeight = Math.Max(1, deviceHeight);
+        ApplyDeviceBaseToLayers();
+        OnPropertyChanged(nameof(DeviceWidth));
+        OnPropertyChanged(nameof(DeviceHeight));
+        OnPropertyChanged(nameof(EditorToDeviceScale));
+        OnPropertyChanged(nameof(FrameWidth));
+        OnPropertyChanged(nameof(FrameHeight));
+        OnPropertyChanged(nameof(EditorCanvasWidth));
+        OnPropertyChanged(nameof(EditorCanvasHeight));
+        OnPropertyChanged(nameof(FrameOffsetX));
+        OnPropertyChanged(nameof(FrameOffsetY));
+        OnPropertyChanged(nameof(CanvasSizeText));
+        UpdateEditorPreview();
+        UpdateSelectionBounds();
+    }
+
+    /// <summary>
+    /// Tells every layer of the edited button how big the surface it is drawn onto is, so the
+    /// editor's size fields report real device pixels. Purely a runtime projection — nothing
+    /// here is persisted.
+    /// </summary>
+    private void ApplyDeviceBaseToLayers()
+    {
+        if (ButtonData?.Layers == null) return;
+        foreach (LayerBase layer in ButtonData.Layers)
+        {
+            if (layer == null) continue;
+            layer.DeviceBaseWidth = DeviceWidth;
+            layer.DeviceBaseHeight = DeviceHeight;
+        }
+    }
+
+    /// <summary>Adds a newly created layer, stamped with the surface size like the existing ones.</summary>
+    private void AddLayer(LayerBase layer)
+    {
+        layer.DeviceBaseWidth = DeviceWidth;
+        layer.DeviceBaseHeight = DeviceHeight;
+        ButtonData.Layers.Add(layer);
+    }
+
+    // ───────── Editor zoom ─────────
+
+    public const double MinZoom = 0.25;
+    public const double MaxZoom = 4.0;
+
+    /// <summary>Uniform scale applied to the editor canvas (via a LayoutTransform, so the
+    /// children keep their unscaled local coordinates and the pointer math is unaffected).</summary>
+    public double ZoomFactor
+    {
+        get;
+        private set
+        {
+            var clamped = Math.Clamp(value, MinZoom, MaxZoom);
+            if (Math.Abs(field - clamped) < 0.0001) return;
+            field = clamped;
+            OnPropertyChanged(nameof(ZoomFactor));
+            OnPropertyChanged(nameof(ZoomPercentText));
+
+            // The canvas is sized to fill the viewport at the current zoom, so it has to
+            // be re-measured and re-rendered whenever the zoom changes.
+            RefreshCanvasExtent();
+        }
+    } = 1.0;
+
+    public string ZoomPercentText => $"{Math.Round(ZoomFactor * 100)}%";
+
+    // Viewport of the scroll area, pushed from the View so Fit can size to it.
+    private Avalonia.Size _viewport;
+
+    /// <summary>Called by the View when the preview viewport is measured/resized so the
+    /// Fit command knows the available space. Opening does NOT auto-zoom — every canvas
+    /// (touch button or side strip) opens at 100%; the user fits/zooms manually.</summary>
+    public void SetViewport(double width, double height)
+    {
+        if (width <= 0 || height <= 0) return;
+        if (Math.Abs(_viewport.Width - width) < 0.5 && Math.Abs(_viewport.Height - height) < 0.5) return;
+
+        _viewport = new Avalonia.Size(width, height);
+
+        // The canvas fills the viewport, so a resized panel means a resized canvas.
+        RefreshCanvasExtent();
+    }
+
+    /// <summary>
+    /// Re-publishes the canvas geometry and repaints the preview after something that
+    /// changes the canvas extent (zoom or viewport). The frame keeps its size — only the
+    /// drawable area around it grows or shrinks.
+    /// </summary>
+    private void RefreshCanvasExtent()
+    {
+        OnPropertyChanged(nameof(EditorCanvasWidth));
+        OnPropertyChanged(nameof(EditorCanvasHeight));
+        OnPropertyChanged(nameof(FrameOffsetX));
+        OnPropertyChanged(nameof(FrameOffsetY));
+        UpdateEditorPreview();
+        UpdateSelectionBounds();
+    }
+
+    private void FitToViewport()
+    {
+        if (_viewport.Width <= 0 || _viewport.Height <= 0) return;
+        // Fit the frame, not the canvas: the canvas always fills the viewport, so fitting
+        // it would be a no-op. 0.92 leaves a little of the surrounding work area visible.
+        var fw = FrameWidth;
+        var fh = FrameHeight;
+        if (fw <= 0 || fh <= 0) return;
+        const double pad = 0.92;
+        var fit = Math.Min(_viewport.Width * pad / fw, _viewport.Height * pad / fh);
+        ZoomFactor = fit;
+    }
+
+    private void ZoomIn() => ZoomFactor *= 1.25;
+    private void ZoomOut() => ZoomFactor /= 1.25;
+    private void ResetZoom() => ZoomFactor = 1.0;
+    private void Fit() => FitToViewport();
+
+    // ───────── Side-strip (Razer) mode ─────────
+
+    private RotaryButtonPage _stripPage;
+
+    /// <summary>
+    /// True when this editor instance is editing a Razer side-strip canvas (rather
+    /// than an ordinary grid touch button). Drives the strip-mode picker and the
+    /// draw-mode gate; false for normal buttons, so their behaviour is unchanged.
+    /// </summary>
+    public bool IsStripCanvas => _stripPage != null;
+
+    /// <summary>Strip modes offered in the editor's picker.</summary>
+    public IReadOnlyList<StripMode> AvailableStripModes { get; } =
+        new[] { StripMode.Segmented, StripMode.FreeDraw, StripMode.PluginOverride };
+
+    /// <summary>Plugin side-strip providers bindable in PluginOverride mode.</summary>
+    public IReadOnlyList<ISideStripProvider> AvailableStripProviders => _sideStripRegistry.Providers;
+
+    /// <summary>True while editing a strip whose mode is PluginOverride — shows the
+    /// provider picker.</summary>
+    public bool IsPluginOverride => IsStripCanvas && StripMode == StripMode.PluginOverride;
+
+    /// <summary>
+    /// The provider bound to this page in PluginOverride mode. Reads/writes
+    /// <see cref="RotaryButtonPage.StripPluginId"/> by id. Setting it repaints the strip
+    /// live via the canvas refresh subscription.
+    /// </summary>
+    public ISideStripProvider SelectedStripProvider
+    {
+        get => _stripPage == null ? null : _sideStripRegistry.Get(_stripPage.StripPluginId);
+        set
+        {
+            if (_stripPage == null) return;
+            var id = value?.Id;
+            if (_stripPage.StripPluginId == id) return;
+            _stripPage.StripPluginId = id;
+            OnPropertyChanged();
+            _stripPage.StripCanvas?.Refresh();
+        }
+    }
+
+    /// <summary>
+    /// The edited side strip's per-page <see cref="StripMode"/>. Writes straight
+    /// through to the owning <see cref="RotaryButtonPage"/>. Segmented shows the dial
+    /// labels; FreeDraw shows (and allows editing of) this page's canvas.
+    /// </summary>
+    public StripMode StripMode
+    {
+        get => _stripPage?.StripMode ?? StripMode.Segmented;
+        set
+        {
+            if (_stripPage == null || _stripPage.StripMode == value) return;
+            _stripPage.StripMode = value;
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(CanEditCanvas));
+            OnPropertyChanged(nameof(IsDrawDisabledHintVisible));
+            OnPropertyChanged(nameof(IsPluginOverride));
+            OnPropertyChanged(nameof(SelectedStripProvider));
+
+            OnPropertyChanged(nameof(IsSegmentCommandMode));
+
+            // The bottom area shows a single command sequence for a normal button / non-FreeDraw
+            // strip, and three (top/middle/bottom) for a FreeDraw strip — rebuild for the new mode.
+            BuildCommandSlots();
+
+            // Repaint the preview so the segment dividers appear/disappear, and the strip on
+            // the device via the canvas's live-redraw subscription (the controller reads the new
+            // mode and renders labels vs. canvas), instead of waiting for the dialog to close.
+            UpdateEditorPreview();
+            _stripPage.StripCanvas?.Refresh();
+        }
+    }
+
+    // ───────── Command sequences (single, or three FreeDraw segments) ─────────
+
+    /// <summary>True when the bottom area edits a FreeDraw strip's three per-segment command
+    /// sequences (top/middle/bottom) instead of the single <see cref="TouchButton.Command"/>.</summary>
+    public bool IsSegmentCommandMode => IsStripCanvas && StripMode == StripMode.FreeDraw;
+
+    private static readonly string[] SegmentTitleKeys = ["Slot_TopSegment", "Slot_MiddleSegment", "Slot_BottomSegment"];
+
+    /// <summary>The editable command sequence strips: one (<see cref="TouchButton.Command"/>)
+    /// for a normal button / non-FreeDraw strip, or three (the FreeDraw segments) bound to the
+    /// page's <see cref="RotaryButtonPage.StripSegmentCommands"/>.</summary>
+    public ObservableCollection<CommandSequenceSlot> CommandSlots { get; } = [];
+
+    /// <summary>The slot a double-clicked tree command appends to; set by clicking a strip.</summary>
+    public CommandSequenceSlot ActiveSlot { get; private set; }
+
+    /// <summary>Marks <paramref name="slot"/> as the active double-click target.</summary>
+    public void SetActiveSlot(CommandSequenceSlot slot)
+    {
+        if (slot == null || ReferenceEquals(ActiveSlot, slot)) return;
+        ActiveSlot = slot;
+        foreach (var s in CommandSlots)
+            s.IsActive = ReferenceEquals(s, slot);
+        OnPropertyChanged(nameof(ActiveSlot));
+    }
+
+    /// <summary>Appends a command (double-click in the tree) to the active slot.</summary>
+    public void InsertCommand(MenuEntry menuEntry) => ActiveSlot?.InsertCommand(menuEntry);
+
+    /// <summary>
+    /// Gives a button that has no artwork yet the layers its first command declares — the same result
+    /// the actions panel produces for it. Commands without a declared layout change nothing. A button
+    /// that already has layers is left alone: the user's work
+    /// is never replaced by picking a command.
+    /// </summary>
+    private void OnMainCommandInserted(MenuEntry menuEntry, bool wasEmpty)
+    {
+        if (!wasEmpty || ButtonData?.Layers is not { Count: 0 } || !CanEditCanvas)
+            return;
+
+        var registered = _commandRegistry.Get(menuEntry.Command);
+
+        // Only a command that declares its own layout gets layers here; every other command leaves
+        // the button as it was, which is how the editor has always behaved.
+        var layout = registered?.Info?.ButtonLayout;
+        if (layout == null)
+            return;
+
+        // The entry the editor's picker hands over does not always carry the glyph, so the command's
+        // own declaration is the fallback.
+        var glyph = string.IsNullOrEmpty(menuEntry.Icon) ? registered.Info.Icon : menuEntry.Icon;
+        var symbolId = SymbolLibrary.TryGetByGlyph(glyph, out var definition) ? definition.Id : string.Empty;
+
+        ActionAssignment.AddLayers(ButtonData, menuEntry.Name, symbolId, DeviceWidth, DeviceHeight, layout, _assetService);
+    }
+
+    /// <summary>(Re)builds the command sequence slots for the current mode and selects the first.</summary>
+    private void BuildCommandSlots()
+    {
+        foreach (var slot in CommandSlots)
+            slot.Cleanup();
+        CommandSlots.Clear();
+        ActiveSlot = null;
+
+        if (ButtonData == null) return;
+
+        if (IsSegmentCommandMode && _stripPage != null)
+        {
+            for (var i = 0; i < RotaryButtonPage.StripSegmentCount; i++)
+            {
+                var index = i;
+                CommandSlots.Add(new CommandSequenceSlot(
+                    Loc.Tr(SegmentTitleKeys[index]), _commandBuilder, _commandRegistry, _commandLock, _dialogService,
+                    () => _stripPage.GetStripSegmentCommand(index),
+                    v => _stripPage.SetStripSegmentCommand(index, string.IsNullOrWhiteSpace(v) ? null : v)));
+            }
+        }
+        else
+        {
+            var slot = new CommandSequenceSlot(
+                Loc.Tr("Slot_CommandSequence"), _commandBuilder, _commandRegistry, _commandLock, _dialogService,
+                () => ButtonData.Command,
+                v => ButtonData.Command = string.IsNullOrWhiteSpace(v) ? null : v);
+            slot.CommandInserted += OnMainCommandInserted;
+            CommandSlots.Add(slot);
+        }
+
+        if (CommandSlots.Count > 0)
+            SetActiveSlot(CommandSlots[0]);
+    }
+
+    /// <summary>
+    /// Whether the canvas and its layers may be edited. Always true for normal touch
+    /// buttons; for a side strip only while it is in <see cref="StripMode.FreeDraw"/>
+    /// — in Segmented mode the strip renders the dial labels, so its canvas is locked.
+    /// </summary>
+    public bool CanEditCanvas => !IsStripCanvas || StripMode == StripMode.FreeDraw;
+
+    /// <summary>Shows the "switch to FreeDraw" hint while a strip's editing is locked.</summary>
+    public bool IsDrawDisabledHintVisible => IsStripCanvas && StripMode != StripMode.FreeDraw;
+
+    /// <summary>
+    /// Marks this editor as editing the side-strip canvas of <paramref name="page"/>,
+    /// enabling the strip-mode picker and the draw-mode gate. Call before
+    /// <see cref="Initialize"/>.
+    /// </summary>
+    public void ConfigureStrip(RotaryButtonPage page)
+    {
+        _stripPage = page;
+        OnPropertyChanged(nameof(IsStripCanvas));
+        OnPropertyChanged(nameof(ShowStatesSection));
+        OnPropertyChanged(nameof(StripMode));
+        OnPropertyChanged(nameof(CanEditCanvas));
+        OnPropertyChanged(nameof(IsDrawDisabledHintVisible));
+        OnPropertyChanged(nameof(IsPluginOverride));
+        OnPropertyChanged(nameof(AvailableStripProviders));
+        OnPropertyChanged(nameof(SelectedStripProvider));
+        OnPropertyChanged(nameof(IsSegmentCommandMode));
+    }
+
+    /// <summary>Spacing of the editor's alignment grid in device pixels; also the
+    /// step used when <see cref="SnapToGrid"/> is active.</summary>
+    public const int GridStepDevice = 10;
+
+    private bool _showGrid;
+
+    /// <summary>Toggles the alignment grid overlay in the preview canvas.</summary>
+    public bool ShowGrid
+    {
+        get => _showGrid;
+        set
+        {
+            if (_showGrid == value) return;
+            _showGrid = value;
+            OnPropertyChanged(nameof(ShowGrid));
+            UpdateEditorPreview();
+        }
+    }
+
+    private bool _snapToGrid;
+
+    /// <summary>When enabled, dragging a layer snaps its top-left edge to the grid.</summary>
+    public bool SnapToGrid
+    {
+        get => _snapToGrid;
+        set
+        {
+            if (_snapToGrid == value) return;
+            _snapToGrid = value;
+            OnPropertyChanged(nameof(SnapToGrid));
+        }
+    }
+
+    public IAsyncRelayCommand AddImageLayerCommand => field ??= Relay.Create(AddImageLayer);
+    public IAsyncRelayCommand AddAnimatedImageLayerCommand => field ??= Relay.Create(AddAnimatedImageLayer);
+    public IRelayCommand AddTextLayerCommand => field ??= Relay.Create(AddTextLayer);
+    public IAsyncRelayCommand AddSymbolLayerCommand => field ??= Relay.Create(AddSymbolLayer);
+
+    public IAsyncRelayCommand AssignApplicationCommand => field ??= Relay.Create(AssignApplication);
+    public IRelayCommand RemoveLayerCommand => field ??= Relay.Create(RemoveSelectedLayer);
+    public IRelayCommand MoveLayerUpCommand => field ??= Relay.Create(MoveSelectedLayerUp);
+    public IRelayCommand MoveLayerDownCommand => field ??= Relay.Create(MoveSelectedLayerDown);
+
+    public IRelayCommand ZoomInCommand => field ??= Relay.Create(ZoomIn);
+    public IRelayCommand ZoomOutCommand => field ??= Relay.Create(ZoomOut);
+    public IRelayCommand ResetZoomCommand => field ??= Relay.Create(ResetZoom);
+    public IRelayCommand FitCommand => field ??= Relay.Create(Fit);
+
+    public TouchButton ButtonData { get; set; }
+
+    /// <summary>1-based button number shared by the window title and the
+    /// properties panel so both read identically; the underlying Index stays
+    /// 0-based.</summary>
+    public int ButtonNumber => (ButtonData?.Index ?? 0) + 1;
+
+    /// <summary>Window title, e.g. "Touch Button 1".</summary>
+    public string ButtonLabel => $"Touch Button {ButtonNumber}";
+
+    /// <summary>Resolution badge shown in the canvas corner, e.g. "90 × 90 px".</summary>
+    public string CanvasSizeText => $"{DeviceWidth} × {DeviceHeight} px";
+
+    private LayerBase _selectedLayer;
+    public LayerBase SelectedLayer
+    {
+        get => _selectedLayer;
+        set
+        {
+            if (ReferenceEquals(_selectedLayer, value)) return;
+            _selectedLayer = value;
+            OnPropertyChanged(nameof(SelectedLayer));
+            OnPropertyChanged(nameof(SelectedImageLayer));
+            OnPropertyChanged(nameof(SelectedTextLayer));
+            OnPropertyChanged(nameof(ScaleHandlesVisible));
+            OnPropertyChanged(nameof(CanDeleteSelectedLayer));
+            OnPropertyChanged(nameof(HasSelectedLayer));
+            OnPropertyChanged(nameof(ShowStateProperties));
+            UpdateSelectionBounds();
+        }
+    }
+
+    public ImageLayer SelectedImageLayer => _selectedLayer as ImageLayer;
+    public TextLayer SelectedTextLayer => _selectedLayer as TextLayer;
+
+    /// <summary>True when a layer is selected — the right panel then shows layer properties.</summary>
+    public bool HasSelectedLayer => _selectedLayer != null;
+
+    /// <summary>
+    /// True when the state itself is the editing context (no layer selected) on a grid touch
+    /// button — the right panel then shows the State properties instead of layer properties.
+    /// </summary>
+    public bool ShowStateProperties => ShowStatesSection && _selectedLayer == null;
+
+    /// <summary>
+    /// True when a deletable (user-created) layer is selected. Command-owned layers
+    /// (<see cref="LayerBase.IsCommandOwned"/>) cannot be deleted manually — they are
+    /// removed by unbinding the button's command — so the delete button is disabled for them.
+    /// </summary>
+    public bool CanDeleteSelectedLayer => _selectedLayer != null && !_selectedLayer.IsCommandOwned;
+
+    private SKBitmap _editorPreview;
+
+    public SKBitmap EditorPreview
+    {
+        get => _editorPreview;
+        private set
+        {
+            if (ReferenceEquals(_editorPreview, value)) return;
+            _editorPreview = value;
+            OnPropertyChanged(nameof(EditorPreview));
+        }
+    }
+
+    private Avalonia.Rect _selectionBounds;
+
+    /// <summary>
+    /// On-canvas (editor-preview coordinates) bounds of the currently selected
+    /// layer. Bound to the selection overlay rectangle in the XAML.
+    /// </summary>
+    public Avalonia.Rect SelectionBounds
+    {
+        get => _selectionBounds;
+        private set
+        {
+            if (_selectionBounds == value) return;
+            _selectionBounds = value;
+            OnPropertyChanged(nameof(SelectionBounds));
+            OnPropertyChanged(nameof(SelectionVisible));
+            OnPropertyChanged(nameof(ScaleHandlesVisible));
+            OnPropertyChanged(nameof(SelectionLeft));
+            OnPropertyChanged(nameof(SelectionTop));
+            OnPropertyChanged(nameof(SelectionWidth));
+            OnPropertyChanged(nameof(SelectionHeight));
+            OnPropertyChanged(nameof(HandleNwLeft));
+            OnPropertyChanged(nameof(HandleNwTop));
+            OnPropertyChanged(nameof(HandleNeLeft));
+            OnPropertyChanged(nameof(HandleNeTop));
+            OnPropertyChanged(nameof(HandleSwLeft));
+            OnPropertyChanged(nameof(HandleSwTop));
+            OnPropertyChanged(nameof(HandleSeLeft));
+            OnPropertyChanged(nameof(HandleSeTop));
+            OnPropertyChanged(nameof(HandleNLeft));
+            OnPropertyChanged(nameof(HandleNTop));
+            OnPropertyChanged(nameof(HandleSLeft));
+            OnPropertyChanged(nameof(HandleSTop));
+            OnPropertyChanged(nameof(HandleWLeft));
+            OnPropertyChanged(nameof(HandleWTop));
+            OnPropertyChanged(nameof(HandleELeft));
+            OnPropertyChanged(nameof(HandleETop));
+        }
+    }
+
+    public bool SelectionVisible => _selectedLayer != null &&
+                                    _selectionBounds.Width > 0 && _selectionBounds.Height > 0;
+
+    /// <summary>
+    /// Resize handles are shown for every layer kind. Text layers use them to
+    /// stretch the rendered text via Scale/ScaleY (independent of TextSize).
+    /// </summary>
+    public bool ScaleHandlesVisible => SelectionVisible;
+    public double SelectionLeft => _selectionBounds.X;
+    public double SelectionTop => _selectionBounds.Y;
+    public double SelectionWidth => _selectionBounds.Width;
+    public double SelectionHeight => _selectionBounds.Height;
+
+    public const double HandleSize = 8;
+    private double Hx(double cx) => cx - (HandleSize / 2.0);
+    private double Hy(double cy) => cy - (HandleSize / 2.0);
+    public double HandleNwLeft => Hx(SelectionLeft);
+    public double HandleNwTop => Hy(SelectionTop);
+    public double HandleNeLeft => Hx(SelectionLeft + SelectionWidth);
+    public double HandleNeTop => Hy(SelectionTop);
+    public double HandleSwLeft => Hx(SelectionLeft);
+    public double HandleSwTop => Hy(SelectionTop + SelectionHeight);
+    public double HandleSeLeft => Hx(SelectionLeft + SelectionWidth);
+    public double HandleSeTop => Hy(SelectionTop + SelectionHeight);
+    public double HandleNLeft => Hx(SelectionLeft + (SelectionWidth / 2.0));
+    public double HandleNTop => Hy(SelectionTop);
+    public double HandleSLeft => Hx(SelectionLeft + (SelectionWidth / 2.0));
+    public double HandleSTop => Hy(SelectionTop + SelectionHeight);
+    public double HandleWLeft => Hx(SelectionLeft);
+    public double HandleWTop => Hy(SelectionTop + (SelectionHeight / 2.0));
+    public double HandleELeft => Hx(SelectionLeft + SelectionWidth);
+    public double HandleETop => Hy(SelectionTop + (SelectionHeight / 2.0));
+
+    public ObservableCollection<MenuEntry> SystemCommandMenus { get; set; }
+    public MenuEntry CurrentMenuEntry { get; set; }
+
+    /// <summary>The card-based command picker (issue #171).</summary>
+    public CommandPickerViewModel CommandPicker { get; }
+
+    public ObservableCollection<VibrationPatternItem> VibrationPatterns => VibrationPatternCatalog.All;
+
+    private VibrationPatternItem _selectedVibrationPattern;
+    public VibrationPatternItem SelectedVibrationPattern
+    {
+        get => _selectedVibrationPattern;
+        set
+        {
+            if (_selectedVibrationPattern == value) return;
+            _selectedVibrationPattern = value;
+            if (ButtonData != null && value != null)
+                ButtonData.VibrationPattern = value.Value;
+            OnPropertyChanged(nameof(SelectedVibrationPattern));
+        }
+    }
+
+    // ───────── States ─────────
+
+    // The active state at open time; restored on close so the runtime starts on the right state
+    // (the editor drives ButtonData's active state to edit each selected state in place).
+    private Guid _originalActiveStateId;
+
+    /// <summary>The button's states, shown in the left-panel States list.</summary>
+    public ObservableCollection<ButtonState> States => ButtonData?.States;
+
+    /// <summary>
+    /// The States section + transition UI are shown for ordinary grid touch buttons only.
+    /// Side-strip canvases keep their single default state and their per-segment command flow.
+    /// </summary>
+    public bool ShowStatesSection => !IsStripCanvas;
+
+    /// <summary>
+    /// Whether the edited state paints its background color. Off leaves the button transparent
+    /// behind its layers, which is what a plugin-rendered indicator usually wants.
+    /// </summary>
+    public bool BackgroundEnabled
+    {
+        get => ButtonData?.BackgroundEnabled ?? false;
+        set
+        {
+            if (ButtonData == null || ButtonData.BackgroundEnabled == value) return;
+            ButtonData.BackgroundEnabled = value;
+            OnPropertyChanged(nameof(BackgroundEnabled));
+        }
+    }
+
+    /// <summary>
+    /// The state currently being edited. Selecting a state makes it the button's active state so
+    /// the existing preview/layers/command machinery edits it in place (the device follows live).
+    /// </summary>
+    public ButtonState SelectedState
+    {
+        get => field;
+        set
+        {
+            if (ReferenceEquals(field, value)) return;
+            field = value;
+            if (value != null && ButtonData != null)
+            {
+                // Switching states mirrors that state's command into ButtonData.Command. That is
+                // a state change, not a command assignment, so it must not reconcile.
+                _switchingState = true;
+                try { ButtonData.SetActiveState(value.Id); }
+                finally { _switchingState = false; }
+            }
+
+            // Layers projects the active state, so the new state's layers need stamping too.
+            ApplyDeviceBaseToLayers();
+
+            SelectedLayer = null;
+            OnPropertyChanged(nameof(SelectedState));
+            OnPropertyChanged(nameof(BackgroundEnabled));
+            OnPropertyChanged(nameof(SelectedStateLabel));
+            OnPropertyChanged(nameof(BehaviorTitle));
+            OnPropertyChanged(nameof(CanDeleteState));
+
+            if (ButtonData != null)
+            {
+                _selectedVibrationPattern = VibrationPatterns.FirstOrDefault(p => p.Value == ButtonData.VibrationPattern);
+                OnPropertyChanged(nameof(SelectedVibrationPattern));
+
+                SeedAnimatedLayerPreviews();
+                BuildCommandSlots();
+                UpdateEditorPreview();
+            }
+        }
+    }
+
+    /// <summary>"Selected State: X" label under the States list.</summary>
+    public string SelectedStateLabel => Loc.Tr("TouchButton_SelectedStateFmt", SelectedState?.Name ?? "-");
+
+    /// <summary>"Behavior for State: X" title above the bottom command/transition area.</summary>
+    public string BehaviorTitle => Loc.Tr("Common_BehaviorForStateFmt", SelectedState?.Name ?? "-");
+
+    /// <summary>
+    /// True while the assigned command owns the states: it created them, and the plugin drives
+    /// which one is active. Managing them by hand would fight that, so the editor locks it —
+    /// the layers inside each state stay editable.
+    /// </summary>
+    public bool AreStatesLocked => ButtonData?.HasCommandOwnedStates == true;
+
+    /// <summary>Inverse of <see cref="AreStatesLocked"/>, for the views' IsEnabled bindings.</summary>
+    public bool CanEditStates => !AreStatesLocked;
+
+    /// <summary>At least two states are needed before one can be deleted.</summary>
+    public bool CanDeleteState => ButtonData?.States is { Count: > 1 } && CanEditStates;
+
+    public IRelayCommand AddStateCommand => field ??= Relay.Create(AddState);
+    public IRelayCommand DuplicateStateCommand => field ??= Relay.Create(DuplicateState);
+    public IRelayCommand DeleteStateCommand => field ??= Relay.Create(DeleteState);
+    public IRelayCommand MoveStateUpCommand => field ??= Relay.Create(MoveStateUp);
+    public IRelayCommand MoveStateDownCommand => field ??= Relay.Create(MoveStateDown);
+    public IRelayCommand SetDefaultStateCommand => field ??= Relay.Create(SetDefaultStateSelected);
+
+    private string GetUniqueStateName(string baseName)
+    {
+        var states = ButtonData?.States;
+        if (states == null) return baseName;
+
+        bool Exists(string name) => states.Any(s => string.Equals(s.Name, name, StringComparison.Ordinal));
+        if (!Exists(baseName)) return baseName;
+
+        var index = 1;
+        while (Exists($"{baseName} {index}")) index++;
+        return $"{baseName} {index}";
+    }
+
+    private void AddState()
+    {
+        if (ButtonData?.States == null || AreStatesLocked) return;
+        var state = new ButtonState { Name = GetUniqueStateName("State") };
+        ButtonData.States.Add(state);
+        RefreshStateBadges();
+        SelectedState = state;
+        OnPropertyChanged(nameof(CanDeleteState));
+    }
+
+    // Settings used to deep-clone a state (layers are polymorphic; colors need their converter).
+    private static readonly Newtonsoft.Json.JsonSerializerSettings StateCloneSettings = CreateStateCloneSettings();
+
+    private static Newtonsoft.Json.JsonSerializerSettings CreateStateCloneSettings()
+    {
+        var settings = new Newtonsoft.Json.JsonSerializerSettings();
+        settings.Converters.Add(new ColorJsonConverter());
+        settings.Converters.Add(new LayerJsonConverter());
+        return settings;
+    }
+
+    private void DuplicateState()
+    {
+        if (ButtonData?.States == null || SelectedState == null || AreStatesLocked) return;
+
+        var json = Newtonsoft.Json.JsonConvert.SerializeObject(SelectedState, StateCloneSettings);
+        var clone = Newtonsoft.Json.JsonConvert.DeserializeObject<ButtonState>(json, StateCloneSettings);
+        if (clone == null) return;
+
+        clone.Id = Guid.NewGuid();
+        clone.IsDefault = false;
+        clone.Name = GetUniqueStateName(SelectedState.Name);
+        clone.RewireLayerHandlers();
+
+        var insertAt = ButtonData.States.IndexOf(SelectedState) + 1;
+        ButtonData.States.Insert(insertAt, clone);
+        RefreshStateBadges();
+        SelectedState = clone;
+        OnPropertyChanged(nameof(CanDeleteState));
+    }
+
+    private void DeleteState()
+    {
+        var states = ButtonData?.States;
+        if (states is not { Count: > 1 } || SelectedState == null || AreStatesLocked) return;
+
+        var removed = SelectedState;
+        var idx = states.IndexOf(removed);
+        states.Remove(removed);
+
+        // Re-point the default if it was deleted; clear dangling Specific transitions.
+        if (ButtonData.DefaultStateId == removed.Id)
+            ButtonData.DefaultStateId = states[0].Id;
+        foreach (var s in states)
+        {
+            if (s.Transition?.Kind == StateTransitionKind.Specific && s.Transition.TargetStateId == removed.Id)
+                s.Transition.TargetStateId = null;
+        }
+
+        RefreshStateBadges();
+        var next = idx < states.Count ? states[idx] : states[^1];
+        SelectedState = next;
+        OnPropertyChanged(nameof(CanDeleteState));
+    }
+
+    private void MoveStateUp()
+    {
+        var states = ButtonData?.States;
+        if (states == null || SelectedState == null || AreStatesLocked) return;
+        var idx = states.IndexOf(SelectedState);
+        if (idx <= 0) return;
+        states.Move(idx, idx - 1);
+        RefreshStateBadges();
+    }
+
+    private void MoveStateDown()
+    {
+        var states = ButtonData?.States;
+        if (states == null || SelectedState == null || AreStatesLocked) return;
+        var idx = states.IndexOf(SelectedState);
+        if (idx < 0 || idx >= states.Count - 1) return;
+        states.Move(idx, idx + 1);
+        RefreshStateBadges();
+    }
+
+    private void SetDefaultStateSelected()
+    {
+        if (ButtonData == null || SelectedState == null || AreStatesLocked) return;
+        ButtonData.DefaultStateId = SelectedState.Id;
+        RefreshStateBadges();
+    }
+
+    /// <summary>Updates the editor-only DisplayIndex / IsDefault badges on every state.</summary>
+    private void RefreshStateBadges()
+    {
+        var states = ButtonData?.States;
+        if (states == null) return;
+        for (var i = 0; i < states.Count; i++)
+        {
+            states[i].DisplayIndex = i + 1;
+            states[i].IsDefault = states[i].Id == ButtonData.DefaultStateId;
+        }
+    }
+
+    // ───────── Reset rules ─────────
+
+    public bool ResetOnPageChange
+    {
+        get => ButtonData?.ResetOnPageChange ?? false;
+        set
+        {
+            if (ButtonData == null || ButtonData.ResetOnPageChange == value) return;
+            ButtonData.ResetOnPageChange = value;
+            OnPropertyChanged(nameof(ResetOnPageChange));
+        }
+    }
+
+    public bool ResetOnRestart
+    {
+        get => ButtonData?.ResetOnRestart ?? true;
+        set
+        {
+            if (ButtonData == null || ButtonData.ResetOnRestart == value) return;
+            ButtonData.ResetOnRestart = value;
+            OnPropertyChanged(nameof(ResetOnRestart));
+        }
+    }
+
+    // ───────── Transition ─────────
+    // The transition pickers bind directly to the per-state model (SelectedState.Transition):
+    // the Kind combo to .Kind, the target combo's SelectedValue to .TargetStateId. Binding to the
+    // model (not a shared VM shim) means switching states never writes a value back into the wrong
+    // state, and the target list stays the full, stable States collection so it never clears.
+
+    /// <summary>The transition kinds shown in the picker (label via TransitionKindLabelConverter).</summary>
+    public IReadOnlyList<StateTransitionKind> TransitionKinds { get; } =
+        (StateTransitionKind[])Enum.GetValues(typeof(StateTransitionKind));
+
+    public TouchButtonSettingsViewModel(
+        ICommandBuilder commandBuilder,
+        IMenuTreeBuilder menuTreeBuilder,
+        ICommandRegistry commandRegistry,
+        Services.Commands.ICommandStateMaterializer stateMaterializer,
+        IAssetService assetService,
+        IDialogService dialogService,
+        ISideStripProviderRegistry sideStripRegistry,
+        IDynamicTextManager dynamicTextManager,
+        Services.Animation.IButtonAnimationManager buttonAnimationManager,
+        Services.Animation.IAnimatedImageImporter animatedImageImporter,
+        Services.Animation.IAnimatedImageCache animatedImageCache,
+        Services.AppLauncher.IAppIconExtractor appIcons,
+        LoupedeckConfig config,
+        DeviceGeometry geometry,
+        Services.Companion.ICommandLockService commandLock)
+    {
+        _commandLock = commandLock;
+        _commandBuilder = commandBuilder;
+        _menuTreeBuilder = menuTreeBuilder;
+        _commandRegistry = commandRegistry;
+        _stateMaterializer = stateMaterializer;
+        _assetService = assetService;
+        _dialogService = dialogService;
+        _sideStripRegistry = sideStripRegistry;
+        _dynamicTextManager = dynamicTextManager;
+        _buttonAnimationManager = buttonAnimationManager;
+        _animatedImageImporter = animatedImageImporter;
+        _animatedImageCache = animatedImageCache;
+        _appIcons = appIcons;
+        _config = config;
+
+        // A grid touch button is edited at the device's own key size — natively, with no
+        // scaling step between the editor canvas and the framebuffer. The strip canvas
+        // overrides this via SetCanvasSize.
+        DeviceWidth = geometry?.KeySize ?? DeviceGeometry.Default.KeySize;
+        DeviceHeight = DeviceWidth;
+        IsVibrationSupported = geometry?.HasVibration ?? true;
+
+        // The provider list can change on a plugin hot-reload while the editor is open.
+        _sideStripRegistry.ProvidersChanged += OnStripProvidersChanged;
+
+        SystemCommandMenus = new ObservableCollection<MenuEntry>();
+        CommandPicker = new CommandPickerViewModel(SystemCommandMenus);
+    }
+
+    public async Task InitializeAsync()
+    {
+        await _menuTreeBuilder.BuildInto(SystemCommandMenus, ButtonTargets.TouchButton);
+    }
+
+    /// <summary>
+    /// Returns a layer name that is unique within the current button. If the
+    /// base name is already taken, an incrementing suffix is appended
+    /// ("Text" → "Text 1" → "Text 2" …).
+    /// </summary>
+    private string GetUniqueLayerName(string baseName)
+    {
+        if (ButtonData?.Layers == null)
+            return baseName;
+
+        bool Exists(string name) =>
+            ButtonData.Layers.Any(l => string.Equals(l.Name, name, StringComparison.Ordinal));
+
+        if (!Exists(baseName))
+            return baseName;
+
+        var index = 1;
+        while (Exists($"{baseName} {index}"))
+            index++;
+
+        return $"{baseName} {index}";
+    }
+
+    private async Task AddImageLayer()
+    {
+        var path = await FileDialogHelper.OpenFileDialog();
+        if (string.IsNullOrEmpty(path) || !File.Exists(path)) return;
+
+        var relative = _assetService.Import(path);
+        if (string.IsNullOrEmpty(relative)) return;
+
+        var layer = new ImageLayer
+        {
+            Name = GetUniqueLayerName(Path.GetFileNameWithoutExtension(path)),
+            AssetRelativePath = relative,
+            CachedImage = _assetService.Load(relative)
+        };
+
+        ApplyInitialStripHeightFit(layer, layer.CachedImage?.Width ?? 0, layer.CachedImage?.Height ?? 0);
+
+        AddLayer(layer);
+        SelectedLayer = layer;
+    }
+
+    /// <summary>
+    /// Populates the static editor preview (first frame) for any animated image layers on the button.
+    /// Their <see cref="ImageLayer.CachedImage"/> is runtime-only (not persisted), so a reopened
+    /// button would otherwise show a blank animated layer until it plays on the device.
+    /// </summary>
+    private void SeedAnimatedLayerPreviews()
+    {
+        if (ButtonData?.Layers == null) return;
+
+        foreach (var layer in ButtonData.Layers)
+        {
+            if (layer is not ImageLayer { IsAnimated: true } img) continue;
+            if (img.CachedImage != null) continue;
+
+            var anim = _animatedImageCache.Get(img.AnimatedAssetPath);
+            if (anim is { Frames.Length: > 0 })
+                img.CachedImage = anim.Frames[0];
+        }
+    }
+
+    private async Task AddAnimatedImageLayer()
+    {
+        if (ButtonData == null) return;
+
+        var path = await FileDialogHelper.OpenAnimatedImageDialog();
+        if (string.IsNullOrEmpty(path) || !File.Exists(path)) return;
+
+        // GIF/WebP are stored as-is; a video is transcoded once here (needs ffmpeg). The decode
+        // and any transcode run off the UI thread. Pass the edited surface size so a video is
+        // fitted to the real target (60×270 for a side strip) preserving aspect, not a 90×90 square.
+        var targetW = DeviceWidth;
+        var targetH = DeviceHeight;
+        // A side strip (tall, non-square) fills its height; a square button letterboxes.
+        var fill = IsStripCanvas;
+        var relative = await Task.Run(() => _animatedImageImporter.ImportAsync(path, targetW, targetH, fill));
+        if (string.IsNullOrEmpty(relative))
+        {
+            // Most likely a video was picked without ffmpeg on PATH.
+            return;
+        }
+
+        // Decode once via the shared cache; show the first frame as a static editor preview
+        // (the editor canvas stays static — animation plays on the device).
+        var anim = await Task.Run(() => _animatedImageCache.Get(relative));
+        if (anim == null) return;
+
+        var layer = new ImageLayer
+        {
+            Name = GetUniqueLayerName(Path.GetFileNameWithoutExtension(path)),
+            AnimatedAssetPath = relative,
+            // First frame as the static editor preview (the editor canvas doesn't animate; playback
+            // happens on the device). Uses the notifying setter so the preview updates immediately.
+            CachedImage = anim.Frames[0]
+        };
+
+        ApplyInitialStripHeightFit(layer, anim.Frames[0]?.Width ?? 0, anim.Frames[0]?.Height ?? 0);
+
+        AddLayer(layer);
+        SelectedLayer = layer;
+    }
+
+    /// <summary>
+    /// For a side-strip canvas (tall, non-square) scales a freshly added image/animation layer so it
+    /// fills the strip HEIGHT while preserving aspect, centred — the surplus width is clipped by the
+    /// strip, the shortfall shows a thin side margin. Nothing is squashed to the 60px width. Ordinary
+    /// square touch buttons keep the default (Scale 1 = aspect-fit within the button), unaffected.
+    /// </summary>
+    private void ApplyInitialStripHeightFit(ImageLayer layer, int sourceWidth, int sourceHeight)
+    {
+        if (layer == null || !IsStripCanvas || sourceWidth <= 0 || sourceHeight <= 0) return;
+
+        // The device render (BitmapHelper.DrawImageLayer) uses fit = min(W/sw, H/sh) then * Scale.
+        // Choosing Scale = H / (sh * fit) makes the displayed height exactly the surface height,
+        // so the clip fills the strip vertically at native resolution (no upscale) and the width
+        // follows the aspect ratio.
+        double fit = Math.Min((double)DeviceWidth / sourceWidth, (double)DeviceHeight / sourceHeight);
+        if (fit <= 0) return;
+
+        double heightFill = DeviceHeight / (sourceHeight * fit);
+        if (heightFill > 1.0) layer.Scale = heightFill;
+    }
+
+    private void AddTextLayer()
+    {
+        // Cap the default box to a compact, square-ish size so a tall surface (e.g. the
+        // 60×270 side strip) doesn't get a text box spanning the whole panel. A normal
+        // 90×90 button is unaffected (min(90,90) = 90).
+        var box = Math.Min(DeviceWidth, DeviceHeight);
+        var layer = new TextLayer
+        {
+            Name = GetUniqueLayerName("Text"),
+            Text = "Text",
+            BoxWidth = box,
+            BoxHeight = box
+        };
+        AddLayer(layer);
+        SelectedLayer = layer;
+    }
+
+    private async Task AddSymbolLayer()
+    {
+        if (ButtonData == null) return;
+
+        var request = new SymbolPickerRequest();
+        var result = await _dialogService.ShowDialogAsync<SymbolPickerViewModel, DialogResult>(
+            vm => vm.Initialize(request));
+
+        if (result is not { IsConfirmed: true }) return;
+
+        SymbolLayer layer;
+        if (request.SelectedPackIcon is { } icon)
+        {
+            layer = new SymbolLayer { Name = GetUniqueLayerName(icon.DisplayName) };
+            if (!ApplyPackIcon(layer, icon, 0.7)) return;
+        }
+        else if (request.SelectedSymbol is { } def)
+        {
+            layer = new SymbolLayer
+            {
+                Name = GetUniqueLayerName(def.DisplayName),
+                SymbolId = def.Id
+            };
+            layer.FitScaleToGlyph(0.7);
+        }
+        else
+            return;
+
+        AddLayer(layer);
+        SelectedLayer = layer;
+    }
+
+    /// <summary>
+    /// Puts an icon-pack icon on a symbol layer: the file is copied into the asset store, so the
+    /// button keeps working when the pack folder goes away. Colored icons keep their colors, single-
+    /// color ones take the tint like a glyph. Returns false when the file could not be copied.
+    /// </summary>
+    private bool ApplyPackIcon(SymbolLayer layer, IconPackEntry icon, double size)
+    {
+        string relative;
+        try
+        {
+            relative = _assetService.Import(icon.FullPath, "icons");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Console.WriteLine($"[IconPacks] Importing '{icon.FullPath}' failed: {ex.Message}");
+            return false;
+        }
+
+        if (string.IsNullOrEmpty(relative)) return false;
+
+        SKBitmap bitmap = _assetService.Load(relative);
+        SKRectI bounds = bitmap != null ? IconColorAnalysis.GetContentBounds(bitmap) : SKRectI.Empty;
+
+        layer.SymbolId = string.Empty;
+        layer.IconSource = icon.Key;
+        layer.IconAssetPath = relative;
+        layer.KeepOriginalColors = bitmap != null && !IconColorAnalysis.IsMonochrome(bitmap);
+        layer.FitScaleToAspect(size, bounds.Height > 0 ? (double)bounds.Width / bounds.Height : 1.0);
+        return true;
+    }
+
+    /// <summary>
+    /// Re-opens the symbol picker for the currently selected <see cref="SymbolLayer"/>
+    /// and applies the new symbol. Invoked from the properties panel.
+    /// </summary>
+    public async Task ChangeSelectedSymbolAsync()
+    {
+        if (_selectedLayer is not SymbolLayer symbol) return;
+
+        var request = new SymbolPickerRequest
+        {
+            CurrentSymbolId = symbol.IsImageIcon ? null : symbol.SymbolId,
+            CurrentPackIconKey = symbol.IsImageIcon ? symbol.IconSource : null
+        };
+        var result = await _dialogService.ShowDialogAsync<SymbolPickerViewModel, DialogResult>(
+            vm => vm.Initialize(request));
+
+        if (result is not { IsConfirmed: true }) return;
+
+        // Keep the box's larger side and re-fit it to the new icon's aspect ratio.
+        double size = Math.Max(symbol.EffectiveScaleX, symbol.EffectiveScaleY);
+
+        if (request.SelectedPackIcon is { } icon)
+        {
+            if (ApplyPackIcon(symbol, icon, size))
+                symbol.Name = icon.DisplayName;
+            return;
+        }
+
+        if (request.SelectedSymbol is not { } def) return;
+
+        // A glyph replaces a pack icon entirely.
+        symbol.IconAssetPath = null;
+        symbol.IconSource = null;
+        symbol.KeepOriginalColors = false;
+        symbol.SymbolId = def.Id;
+        symbol.Name = def.DisplayName;
+        symbol.FitScaleToGlyph(size);
+    }
+
+    /// <summary>
+    /// Picks an installed application and assigns it to this button: its launch command plus its
+    /// icon as the button image.
+    /// </summary>
+    /// <remarks>
+    /// The icon is resolved <em>before</em> anything on the button is written, so a failed
+    /// extraction cannot leave the button half-applied. Replacing existing layers is confirmed
+    /// first — the user may have built the artwork by hand.
+    /// </remarks>
+    private async Task AssignApplication()
+    {
+        if (ButtonData == null) return;
+
+        AppPickerRequest request = new();
+        DialogResult result = await _dialogService.ShowDialogAsync<AppPickerViewModel, DialogResult>(
+            vm => vm.Initialize(request));
+
+        if (result is not { IsConfirmed: true } || request.SelectedApp == null) return;
+
+        Services.AppLauncher.InstalledApp app = request.SelectedApp;
+
+        // Resolve and import the icon up front: extraction is file IO and P/Invoke, and must not
+        // run while the button is being mutated.
+        string relative = null;
+        string iconFile = await _appIcons.GetIconFileAsync(app);
+        if (!string.IsNullOrEmpty(iconFile) && File.Exists(iconFile))
+            relative = _assetService.Import(iconFile);
+
+        bool replaceLayers = false;
+        if (ButtonData.Layers.Count > 0 && !string.IsNullOrEmpty(relative))
+        {
+            replaceLayers = !await ConfirmDialogHelper.AskKeepDiscardAsync(
+                WindowHelper.GetMainWindow(),
+                Loc.Tr("Confirm_AssignApplicationTitle"),
+                Loc.Tr("Confirm_AssignApplicationMessage", app.Name),
+                Loc.Tr("Confirm_Keep"),
+                Loc.Tr("Confirm_Replace"));
+        }
+
+        // Resolved before the layer exists: GetUniqueLayerName searches the collection, so asking
+        // after the layer is in it would always collide with the layer itself. Replacing clears the
+        // collection first, so there is nothing left to collide with.
+        string layerName = replaceLayers ? app.Name : GetUniqueLayerName(app.Name);
+
+        // The short edge of the surface being edited, mirroring what the renderer resolves a
+        // fitted layer against — a grid key here, or the strip canvas when editing one.
+        int keySize = Math.Min(DeviceWidth, DeviceHeight);
+
+        ImageLayer layer = Services.AppLauncher.AppAssignment.ApplyToTouchButton(
+            ButtonData, app, relative, replaceLayers, layerName, keySize);
+
+        if (layer != null)
+        {
+            layer.CachedImage = _assetService.Load(relative);
+            SelectedLayer = layer;
+        }
+
+        BuildCommandSlots();
+        UpdateEditorPreview();
+    }
+
+    private void RemoveSelectedLayer()
+    {
+        // A layer owned by the command that is still bound belongs to that command: it is removed
+        // by unbinding it (the dynamic-text manager's orphan sweep), not by hand. One left behind
+        // by a command that is gone has no owner left, so the user may delete it.
+        if (_selectedLayer == null || IsOwnedByBoundCommand(_selectedLayer)) return;
+        var idx = ButtonData.Layers.IndexOf(_selectedLayer);
+        ButtonData.Layers.Remove(_selectedLayer);
+        // Prefer the item that moved into the freed slot (the one below); fall back
+        // to the new last item (the one above) when the removed layer was last.
+        var next = (idx < ButtonData.Layers.Count) ? ButtonData.Layers[idx]
+            : (ButtonData.Layers.Count > 0 ? ButtonData.Layers[^1] : null);
+        ReselectAfterMove(next);
+    }
+
+    /// <summary>True when the layer belongs to the command currently bound to the button.</summary>
+    private bool IsOwnedByBoundCommand(LayerBase layer)
+    {
+        if (layer == null || !layer.IsCommandOwned) return false;
+
+        string boundKey = PluginLayerKey.For(ButtonData?.Command);
+        return boundKey != null && string.Equals(layer.OwnerKey, boundKey, StringComparison.Ordinal);
+    }
+
+    private void MoveSelectedLayerUp()
+    {
+        if (_selectedLayer == null) return;
+        var layer = _selectedLayer;
+        var idx = ButtonData.Layers.IndexOf(layer);
+        if (idx <= 0) return;
+        ButtonData.Layers.Move(idx, idx - 1);
+        ReselectAfterMove(layer);
+    }
+
+    private void MoveSelectedLayerDown()
+    {
+        if (_selectedLayer == null) return;
+        var layer = _selectedLayer;
+        var idx = ButtonData.Layers.IndexOf(layer);
+        if (idx < 0 || idx >= ButtonData.Layers.Count - 1) return;
+        ButtonData.Layers.Move(idx, idx + 1);
+        ReselectAfterMove(layer);
+    }
+
+    /// <summary>
+    /// Re-applies the selection after an <see cref="ObservableCollection{T}.Move"/>.
+    /// The ListBox processes the move (remove+add) on a later dispatcher cycle and
+    /// clears its selection in the process, so a synchronous re-assign gets
+    /// overwritten — posting it ensures it lands after the ListBox has caught up.
+    /// </summary>
+    private void ReselectAfterMove(LayerBase layer)
+    {
+        Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+        {
+            // Force the property to re-raise even if the value matches, so the
+            // ListBox is told to re-select after it cleared its own selection.
+            SelectedLayer = null;
+            SelectedLayer = layer;
+        });
+    }
+
+    /// <summary>
+    /// Resets the touch button to a blank default state — clears command, text, image and
+    /// all visual settings. Triggers a single redraw at the end via Refresh().
+    /// </summary>
+    public void ClearButton()
+    {
+        if (ButtonData == null) return;
+
+        // For a free-draw strip, also clear all three per-segment commands (the strip's
+        // "command" is the three segments, not ButtonData.Command).
+        if (IsSegmentCommandMode && _stripPage != null)
+        {
+            for (var i = 0; i < RotaryButtonPage.StripSegmentCount; i++)
+                _stripPage.SetStripSegmentCommand(i, null);
+        }
+
+        var b = ButtonData;
+        var fresh = new ButtonState { Name = "Default" };
+        b.IgnoreRefresh = true;
+        try
+        {
+            // Reset to a single blank default state, discarding any extra states, and reset the
+            // mode / reset rules. (A single state behaves like a non-stateful button.)
+            b.States.Clear();
+            b.States.Add(fresh);
+            b.DefaultStateId = fresh.Id;
+            b.StateOwnerCommand = null;
+            b.Mode = ButtonStateMode.Local;
+            b.ResetOnPageChange = false;
+            b.ResetOnRestart = true;
+            b.SetActiveState(fresh.Id);
+        }
+        finally
+        {
+            b.IgnoreRefresh = false;
+        }
+        b.Refresh();
+
+        RefreshStateBadges();
+        SelectedLayer = null;
+        // Selecting the fresh state re-points the preview, layers and command slots.
+        SelectedState = fresh;
+
+        OnPropertyChanged(nameof(AreStatesLocked));
+        OnPropertyChanged(nameof(CanEditStates));
+        OnPropertyChanged(nameof(CanDeleteState));
+        OnPropertyChanged(nameof(ResetOnPageChange));
+        OnPropertyChanged(nameof(ResetOnRestart));
+    }
+
+    /// <summary>True while the editor switches the edited state, see <see cref="SelectedState"/>.</summary>
+    private bool _switchingState;
+
+    private void ButtonData_PropertyChanged(object sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(TouchButton.Command))
+        {
+            // Every insert/clear/parameter edit funnels through ButtonData.Command, so this is the
+            // one place a command that declares its own states needs to be reconciled.
+            ReconcileCommandStates();
+
+            // Re-scan dynamic-text/-image commands and animated display commands so a display
+            // command's layer appears (or its orphaned layer disappears) immediately while the
+            // editor is open, instead of only after it closes. The strip-canvas surface is not a
+            // real page button, so skip it.
+            if (!IsStripCanvas)
+            {
+                Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+                {
+                    _dynamicTextManager.Rescan();
+                    _buttonAnimationManager.Rescan();
+                });
+            }
+        }
+    }
+
+    /// <summary>
+    /// Creates the states of a newly assigned command that declares its own, or releases them
+    /// again when that command was removed or replaced.
+    /// </summary>
+    private void ReconcileCommandStates()
+    {
+        if (ButtonData == null || IsStripCanvas || _switchingState) return;
+
+        Services.Commands.StateSyncResult result = _stateMaterializer.Reconcile(ButtonData);
+        switch (result)
+        {
+            case Services.Commands.StateSyncResult.Unchanged:
+                return;
+
+            case Services.Commands.StateSyncResult.ReleaseRequested:
+                EventHandler<StateReleaseRequest> handler = StateReleaseRequested;
+                if (handler == null)
+                {
+                    // No view attached to ask: keep the states, the non-destructive choice.
+                    CompleteStateRelease(keepStates: true);
+                    return;
+                }
+
+                handler(this, new StateReleaseRequest(_stateMaterializer.GetOwnerDisplayName(ButtonData)));
+                return;
+
+            default:
+                RefreshAfterStateSync();
+                return;
+        }
+    }
+
+    /// <summary>
+    /// Raised when the command owning the button's states was removed or replaced. The view asks
+    /// the user and answers through <see cref="CompleteStateRelease"/>.
+    /// </summary>
+    public event EventHandler<StateReleaseRequest> StateReleaseRequested;
+
+    /// <summary>
+    /// Applies the user's answer to a <see cref="StateReleaseRequested"/> prompt, then lets a
+    /// replacement command that declares states create its own.
+    /// </summary>
+    public void CompleteStateRelease(bool keepStates)
+    {
+        if (ButtonData == null) return;
+
+        _stateMaterializer.Release(ButtonData, keepStates);
+        _stateMaterializer.Reconcile(ButtonData);
+        RefreshAfterStateSync();
+    }
+
+    /// <summary>Re-reads everything the state set feeds after it was created or released.</summary>
+    private void RefreshAfterStateSync()
+    {
+        RefreshStateBadges();
+        SelectedLayer = null;
+        SelectedState = ButtonData?.States.Count > 0 ? ButtonData.States[0] : null;
+
+        OnPropertyChanged(nameof(AreStatesLocked));
+        OnPropertyChanged(nameof(CanEditStates));
+        OnPropertyChanged(nameof(CanDeleteState));
+        OnPropertyChanged(nameof(BackgroundEnabled));
+        OnPropertyChanged(nameof(ResetOnPageChange));
+        OnPropertyChanged(nameof(ResetOnRestart));
+    }
+
+    private void ButtonData_ItemChanged(object sender, EventArgs e)
+    {
+        // ItemChanged may fire on a background thread (e.g. dynamic-text timer).
+        // Dispatch to the UI thread so the bitmap swap and property notifications
+        // are observed by Avalonia bindings.
+        Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+        {
+            UpdateEditorPreview();
+            UpdateSelectionBounds();
+        });
+    }
+
+    private void UpdateEditorPreview()
+    {
+        if (ButtonData == null || _config == null) return;
+        // Segment dividers only make sense (and are only drawn) for a free-draw side
+        // strip; the renderer further gates them on the grid toggle.
+        var segmentCount = IsSegmentCommandMode ? RotaryButtonPage.StripSegmentCount : 0;
+        EditorPreview = BitmapHelper.RenderEditorCanvas(
+            ButtonData, _config, EditorCanvasWidth, EditorCanvasHeight, DeviceWidth, DeviceHeight,
+            ShowGrid, GridStepDevice, segmentCount);
+    }
+
+    /// <summary>
+    /// Re-renders the editor preview + selection overlay without going through
+    /// the TouchButton.ItemChanged pipeline. Called from the code-behind during
+    /// drag while <see cref="TouchButton.IgnoreRefresh"/> is true so the device
+    /// is not flooded with serial writes.
+    /// </summary>
+    public void PreviewRefreshDuringDrag()
+    {
+        UpdateEditorPreview();
+        UpdateSelectionBounds();
+    }
+
+    private void UpdateSelectionBounds()
+    {
+        if (_selectedLayer == null)
+        {
+            SelectionBounds = default;
+            return;
+        }
+
+        var rect = BitmapHelper.GetLayerEditorBounds(
+            _selectedLayer, EditorCanvasWidth, EditorCanvasHeight, DeviceWidth, DeviceHeight);
+
+        if (rect == null)
+        {
+            SelectionBounds = default;
+            return;
+        }
+
+        var r = rect.Value;
+        SelectionBounds = new Avalonia.Rect(r.Left, r.Top, r.Width, r.Height);
+    }
+
+    /// <summary>
+    /// Detaches event handlers — called by the View when the dialog closes so the
+    /// (singleton) TouchButton does not keep the (transient) ViewModel alive.
+    /// </summary>
+    public void Cleanup()
+    {
+        if (ButtonData != null)
+        {
+            // Restore the runtime active state so editor state-switching is not persisted as the
+            // live state (the device repaints to it on close).
+            if (ButtonData.States?.Any(s => s.Id == _originalActiveStateId) == true)
+                ButtonData.SetActiveState(_originalActiveStateId);
+            else
+                ButtonData.ResetToDefaultState();
+
+            ButtonData.ItemChanged -= ButtonData_ItemChanged;
+            ButtonData.PropertyChanged -= ButtonData_PropertyChanged;
+        }
+
+        _sideStripRegistry.ProvidersChanged -= OnStripProvidersChanged;
+
+        foreach (var slot in CommandSlots)
+            slot.Cleanup();
+
+        CommandPicker.Cleanup();
+    }
+
+    private void OnStripProvidersChanged()
+    {
+        Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+        {
+            OnPropertyChanged(nameof(AvailableStripProviders));
+            OnPropertyChanged(nameof(SelectedStripProvider));
+        });
+    }
+}

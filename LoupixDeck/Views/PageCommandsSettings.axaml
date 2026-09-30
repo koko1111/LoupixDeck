@@ -1,0 +1,73 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:loc="using:LoupixDeck.Localization"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:vm="using:LoupixDeck.ViewModels"
+        xmlns:local="using:LoupixDeck"
+        xmlns:views="using:LoupixDeck.Views"
+        x:Class="LoupixDeck.Views.PageCommandsSettings"
+        x:DataType="vm:PageCommandsSettingsViewModel"
+        mc:Ignorable="d"
+        Title="{loc:Tr PageCommands_PageCommands}"
+        Width="1040"
+        Height="660"
+        WindowStartupLocation="CenterOwner"
+        CanResize="False">
+    <Window.Styles>
+        <StyleInclude Source="avares://LoupixDeck/Views/Styles/SettingsStyles.axaml" />
+    </Window.Styles>
+
+    <Grid Margin="16" RowDefinitions="Auto,*,Auto" RowSpacing="12">
+
+        <TextBlock Grid.Row="0" Classes="card-title" Margin="0"
+                   Text="{loc:TrFormat PageCommands_TitleFmt, PageName}" />
+
+        <Grid Grid.Row="1" ColumnDefinitions="*,12,400">
+
+            <!-- Slot editor -->
+            <ScrollViewer Grid.Column="0" HorizontalScrollBarVisibility="Disabled">
+                <ItemsControl ItemsSource="{Binding Slots}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate DataType="vm:WrapSlot">
+                            <Border Background="{DynamicResource AppSurface}" BorderBrush="{DynamicResource AppBorderSubtle}" BorderThickness="1"
+                                    CornerRadius="8" Padding="14" Margin="0,0,4,10">
+                                <StackPanel Spacing="6">
+                                    <TextBlock Classes="card-title" Text="{Binding Label}" Margin="0,0,0,6" />
+
+                                    <CheckBox Content="{loc:Tr PageCommands_RunPreExecutionCommands}"
+                                              IsChecked="{Binding Wrap.PreEnabled, Mode=TwoWay}" />
+                                    <TextBox Tag="pre" GotFocus="OnCommandBoxFocused"
+                                             PlaceholderText="cmd1 &amp;&amp; cmd2 &amp;&amp; …"
+                                             Text="{Binding Wrap.PreCommands, Mode=TwoWay}"
+                                             IsEnabled="{Binding Wrap.PreEnabled}" />
+
+                                    <CheckBox Content="{loc:Tr PageCommands_RunPostExecutionCommands}" Margin="0,6,0,0"
+                                              IsChecked="{Binding Wrap.PostEnabled, Mode=TwoWay}" />
+                                    <TextBox Tag="post" GotFocus="OnCommandBoxFocused"
+                                             PlaceholderText="cmd1 &amp;&amp; cmd2 &amp;&amp; …"
+                                             Text="{Binding Wrap.PostCommands, Mode=TwoWay}"
+                                             IsEnabled="{Binding Wrap.PostEnabled}" />
+                                </StackPanel>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </ScrollViewer>
+
+            <!-- Card-based command picker (issue #171). Double-click a command to
+                 append it to the focused command box. -->
+            <Border Grid.Column="2"
+                    BorderBrush="{DynamicResource AppBorderSubtle}" BorderThickness="1" CornerRadius="4"
+                    Padding="4">
+                <views:CommandPickerView Name="PickerControl"
+                                         DataContext="{Binding CommandPicker}" />
+            </Border>
+        </Grid>
+
+        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
+            <Button Content="{loc:Tr PageCommands_Cancel}" MinWidth="100" Command="{Binding CancelCommand}" />
+            <Button Content="{loc:Tr PageCommands_OK}"     MinWidth="100" IsDefault="True" Command="{Binding ConfirmCommand}" />
+        </StackPanel>
+    </Grid>
+</Window>

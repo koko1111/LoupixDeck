@@ -1,0 +1,691 @@
+﻿using LoupixDeck.Controllers;
+using LoupixDeck.Models;
+using LoupixDeck.Registry;
+using LoupixDeck.Services;
+using LoupixDeck.Services.ActiveWindow;
+using LoupixDeck.Services.AppLauncher;
+using LoupixDeck.Services.AppSwitching;
+using LoupixDeck.Services.Commands;
+using LoupixDeck.Services.Diagnostics.Linux;
+using LoupixDeck.Services.Diagnostics.Linux.Checks;
+using LoupixDeck.Services.Diagnostics.Linux.Checks.Devices;
+using LoupixDeck.Services.Diagnostics.Linux.Checks.Installation;
+using LoupixDeck.Services.Diagnostics.Linux.Checks.Plugins;
+using LoupixDeck.Services.DialPresets;
+using LoupixDeck.Services.FolderNavigation;
+using LoupixDeck.Services.IconPacks;
+using LoupixDeck.Services.Macros;
+using LoupixDeck.Services.Mouse;
+using LoupixDeck.Services.Plugins;
+using LoupixDeck.Services.SystemPower;
+using LoupixDeck.Utils;
+using LoupixDeck.ViewModels;
+using LoupixDeck.ViewModels.Diagnostics;
+using LoupixDeck.ViewModels.Plugins;
+using LoupixDeck.Views;
+using Microsoft.Extensions.DependencyInjection;
+
+namespace LoupixDeck;
+
+/// <summary>
+/// DI wiring for the issue #116 root + per-device topology.
+///
+/// <see cref="AddRootServices"/> registers the device-agnostic singletons (OS input,
+/// config/asset IO, macro store, plugin discovery). <see cref="AddDeviceServices"/>
+/// builds one child collection per device: it forwards the root singletons in via
+/// <see cref="Forward{T}"/> and registers everything device-bound — including the
+/// command catalog and the plugin-host wiring — so command activation and plugin
+/// delegates resolve through THIS device's provider. Phase 1 instantiates exactly one
+/// device; Phase 2 starts N child providers.
+/// </summary>
+public static class ServiceCollectionExtensions
+{
+    /// <summary>Re-expose a root-container singleton inside a device child collection.
+    /// The instance stays the single root instance; only the resolution is forwarded.</summary>
+    private static void Forward<T>(this IServiceCollection collection, IServiceProvider root)
+        where T : class
+        => collection.AddSingleton(_ => root.GetRequiredService<T>());
+
+    /// <summary>
+    /// Registers the Linux Device Doctor checks (issue #258). Registration order is run order
+    /// and report order, so the page reads the same way on every run.
+    /// </summary>
+    private static void AddLinuxDiagnosticChecks(this IServiceCollection collection)
+    {
+        collection.AddSingleton<ILinuxDiagnosticCheck, DistributionCheck>();
+        collection.AddSingleton<ILinuxDiagnosticCheck, KernelCheck>();
+        collection.AddSingleton<ILinuxDiagnosticCheck, ArchitectureCheck>();
+        collection.AddSingleton<ILinuxDiagnosticCheck, InstallationModeCheck>();
+        collection.AddSingleton<ILinuxDiagnosticCheck, VersionsCheck>();
+
+        collection.AddSingleton<ILinuxDiagnosticCheck, DesktopEnvironmentCheck>();
+        collection.AddSingleton<ILinuxDiagnosticCheck, SessionTypeCheck>();
+        collection.AddSingleton<ILinuxDiagnosticCheck, XWaylandCheck>();
+        collection.AddSingleton<ILinuxDiagnosticCheck, XPropCheck>();
+        collection.AddSingleton<ILinuxDiagnosticCheck, ActiveWindowCheck>();
+        collection.AddSingleton<ILinuxDiagnosticCheck, PipeWireSocketCheck>();
+        collection.AddSingleton<ILinuxDiagnosticCheck, DBusSessionBusCheck>();
+        collection.AddSingleton<ILinuxDiagnosticCheck, DBusSystemBusCheck>();
+
+        collection.AddSingleton<ILinuxDiagnosticCheck, UInputNodeCheck>();
+        collection.AddSingleton<ILinuxDiagnosticCheck, InputGroupMembershipCheck>();
+        collection.AddSingleton<ILinuxDiagnosticCheck, UdevRuleCheck>();
+        collection.AddSingleton<ILinuxDiagnosticCheck, UInputWriteAccessCheck>();
+        collection.AddSingleton<ILinuxDiagnosticCheck, UInputCreateProbeCheck>();
+
+        collection.AddSingleton<ILinuxDiagnosticCheck, EventNodesPresentCheck>();
+        collection.AddSingleton<ILinuxDiagnosticCheck, EventNodeReadableCheck>();
+        collection.AddSingleton<ILinuxDiagnosticCheck, EventAccessMechanismCheck>();
+
+        collection.AddSingleton<ILinuxDiagnosticCheck, PluginDirectoriesCheck>();
+        collection.AddSingleton<ILinuxDiagnosticCheck, PluginManifestCheck>();
+
+        collection.AddSingleton<ILinuxDiagnosticCheck, DesktopEntryCheck>();
+        collection.AddSingleton<ILinuxDiagnosticCheck, LauncherCheck>();
+        collection.AddSingleton<ILinuxDiagnosticCheck, AutostartEntryCheck>();
+        collection.AddSingleton<ILinuxDiagnosticCheck, SteamOsPersistenceCheck>();
+
+        // The decks themselves are not known until a run starts, so their checks come from a
+        // source rather than from this list.
+        collection.AddSingleton<ILinuxDiagnosticCheckSource, DeviceCheckSource>();
+        collection.AddSingleton<ILinuxDiagnosticCheckSource, PluginStateCheckSource>();
+    }
+
+    // ───────────────────────── Root (device-agnostic) ─────────────────────────
+
+    public static void AddRootServices(this IServiceCollection collection)
+    {
+        // Registry of every device brought up this session — process-wide concerns
+        // (quit → shut down all devices' plugins) and phase-3 UI/CLI reach devices through it.
+        collection.AddSingleton<IDeviceHostRegistry, DeviceHostRegistry>();
+
+        // Routes the shared plugins' host calls to the device that triggered them.
+        collection.AddSingleton<IDeviceRouter, DeviceRouter>();
+
+        // Plugins are loaded once (shared instances); per-call device targeting is via
+        // the router. Loading natively-interop deps (e.g. NAudio/COM) per device would
+        // clash across collectible load contexts, so a single shared load is required.
+        collection.AddSingleton<Services.PluginStore.IPluginCommandIndex, Services.PluginStore.PluginCommandIndex>();
+        collection.AddSingleton<IPluginManager, PluginManager>();
+
+        collection.AddSingleton<IConfigService, ConfigService>();
+        collection.AddSingleton<IAssetService, AssetService>();
+
+        // "Start with Windows" toggle (settings). Registry-backed on Windows, no-op elsewhere.
+        collection.AddSingleton<IAutostartService, AutostartService>();
+
+        // Installed-application discovery and icons, for putting an app on a button. Device-
+        // agnostic — the machine's applications are the same for every deck — so the scan and both
+        // caches are shared at the root and forwarded into each device provider.
+        if (OperatingSystem.IsLinux())
+            collection.AddSingleton<IAppDiscoveryService, LinuxAppDiscoveryService>();
+#if WINDOWS
+        else if (OperatingSystem.IsWindows())
+            collection.AddSingleton<IAppDiscoveryService, WindowsAppDiscoveryService>();
+#endif
+        else
+            collection.AddSingleton<IAppDiscoveryService, NoOpAppDiscoveryService>();
+
+        collection.AddSingleton<IAppIconExtractor, AppIconExtractor>();
+        collection.AddSingleton<ICustomAppStore, CustomAppStore>();
+
+        // Icon folders added to the symbol picker; the same packs for every device.
+        collection.AddSingleton<IIconPackService, IconPackService>();
+
+        // Animated-button assets (issue #121): decode-once frame cache and the import/transcode
+        // pipeline are device-agnostic, so they live as shared root singletons (one decode shared
+        // across devices) and are forwarded into each device provider.
+        collection.AddSingleton<Services.Animation.IAnimatedImageCache, Services.Animation.AnimatedImageCache>();
+        collection.AddSingleton<Services.Animation.IAnimatedImageImporter, Services.Animation.AnimatedImageImporter>();
+
+        collection.AddSingleton<IDBusController, DBusController>();
+
+        // Linux Device Doctor (issue #258). The session, uinput and evdev facts are the same for
+        // every deck, so one root instance is forwarded into each device provider. On Windows no
+        // check is registered and the service reports itself as unsupported.
+        collection.AddSingleton<ILinuxDiagnosticsService, LinuxDiagnosticsService>();
+
+        // The optional interactive tests. Registered on every platform, unlike the checks:
+        // LinuxDiagnosticsViewModel is built wherever the settings window opens, and a service
+        // that exists only on Linux would take the window down on Windows. On a non-Linux system
+        // no Linux category is ever shown, so no test can be started.
+        collection.AddSingleton<IInteractiveDiagnosticTests, InteractiveDiagnosticTests>();
+
+        if (OperatingSystem.IsLinux())
+        {
+            collection.AddLinuxDiagnosticChecks();
+        }
+
+        // Update check against GitHub Releases (issue #233). App-wide: one check, one hint, one
+        // installer run, whatever the number of devices.
+        collection.AddSingleton<Services.Updates.IUpdateService, Services.Updates.UpdateService>();
+        collection.AddSingleton<Services.Updates.IUpdateInstaller, Services.Updates.UpdateInstaller>();
+
+        // Plugin store (issue #234): one catalog, one release cache and one plugin update check for the
+        // app, like the plugins themselves.
+        collection.AddSingleton<Services.PluginStore.IPluginStoreService, Services.PluginStore.PluginStoreService>();
+
+        // Notice strip of the main window (issue #315): one list the app update hint, the plugin update
+        // hint and the plugin requirement notices all post to.
+        collection.AddSingleton<Services.Notices.INoticeService, Services.Notices.NoticeService>();
+#if WINDOWS
+        if (OperatingSystem.IsWindows())
+            collection.AddSingleton<Services.Updates.IUpdateNotifier, Services.Updates.WindowsUpdateNotifier>();
+        else
+#endif
+            collection.AddSingleton<Services.Updates.IUpdateNotifier, Services.Updates.DBusUpdateNotifier>();
+
+        collection.AddSingleton<ICommandRunner, CommandRunner>();
+
+        // The platform service is wrapped in the wall-clock resume detector: its notification
+        // is missing entirely on Modern-Standby machines and wherever the Linux signal source
+        // is unavailable, and a wake nobody reports leaves the device dark (issue #195).
+        collection.AddSingleton<ISystemPowerService>(_ =>
+            new ResumeDetectingSystemPowerService(CreatePlatformPowerService()));
+
+        // Foreground-window monitor. The Linux monitor needs no #if guard (it only uses
+        // Process + /proc); only the Windows type lives behind #if WINDOWS.
+        if (OperatingSystem.IsLinux())
+            collection.AddSingleton<IActiveWindowMonitor, LinuxActiveWindowMonitor>();
+#if WINDOWS
+        else if (OperatingSystem.IsWindows())
+            collection.AddSingleton<IActiveWindowMonitor, WindowsActiveWindowMonitor>();
+#endif
+        else
+            collection.AddSingleton<IActiveWindowMonitor, NoOpActiveWindowMonitor>();
+
+        // In-app clipboard for button/side-display copy/paste (issue #166). Root singleton so a
+        // snapshot copied on one device can be pasted onto another.
+        collection.AddSingleton<IButtonClipboardService, ButtonClipboardService>();
+
+        // User-defined macros: in-memory store (macros.json), shared across devices.
+        collection.AddSingleton<IMacroManager, MacroManager>();
+
+        // User-created dial presets: in-memory store (dial-presets.json), shared across devices so
+        // a preset saved on one deck can be applied on another. The built-in presets are not here —
+        // which of them an installation can run depends on the per-device command registry.
+        collection.AddSingleton<IDialPresetStore, DialPresetStore>();
+
+        // App-global macro cancellation: per-device runners register here so the global
+        // stop hotkey (a single process-wide listener) can cancel macros on every device.
+        collection.AddSingleton<IMacroStopCoordinator, MacroStopCoordinator>();
+        collection.AddSingleton<IMacroStopHotkeyService, MacroStopHotkeyService>();
+
+        // Cached foreground-window snapshot + macro condition evaluator (used by If / Wait
+        // steps). Shared app-wide so they observe a single monitor and process table.
+        collection.AddSingleton<IActiveWindowState, ActiveWindowState>();
+        collection.AddSingleton<IMacroConditionEvaluator, MacroConditionEvaluator>();
+
+        // App-wide execution-mode gatekeeper: enforces Run Once / Restart / Parallel across
+        // every device (macros are keyed by name, which can be bound on multiple devices).
+        collection.AddSingleton<IMacroExecutionRegistry, MacroExecutionRegistry>();
+
+        // Runtime text-input prompts for Prompt steps (shown on the UI thread).
+        collection.AddSingleton<IMacroPromptService, MacroPromptService>();
+
+        // Runtime USB hot-plug (issue #116 phase 3b): the OS-native watcher signals
+        // topology changes; the manager diffs them against the running device set and
+        // raises attach/detach events App turns into provider/VM bring-up + teardown.
+        collection.AddSingleton<Services.HotPlug.IDeviceWatcher>(_ => Services.HotPlug.DeviceWatcher.Create());
+        collection.AddSingleton<Services.HotPlug.IHotPlugManager, Services.HotPlug.HotPlugManager>();
+
+        // Companion system: the master/companion relationships between devices live in one
+        // companions.json (they span devices, so they are not part of any device config), and
+        // the coordinator that derives roles and permissions from them is process-wide.
+        collection.AddSingleton<Services.Companion.ICompanionStore, Services.Companion.CompanionStore>();
+        collection.AddSingleton<Services.Companion.ICompanionCoordinator, Services.Companion.CompanionCoordinator>();
+
+        // Opens pages on a master's companions, inside the workspace they share.
+        collection.AddSingleton<Services.Companion.ICompanionNavigation, Services.Companion.CompanionNavigationService>();
+
+        // Mirrors each master's profiles and workspaces onto its companions, unplugged ones included.
+        collection.AddSingleton<Services.Companion.ICompanionContextSync, Services.Companion.CompanionContextSyncService>();
+    }
+
+    // ───────────────────────── Device (per-device child) ─────────────────────────
+
+    public static void AddDeviceServices(this IServiceCollection collection, ResolvedDevice resolved,
+        IServiceProvider root)
+    {
+        ArgumentNullException.ThrowIfNull(resolved);
+        ArgumentNullException.ThrowIfNull(root);
+        var deviceInfo = resolved.Info;
+
+        collection.AddSingleton(resolved);
+        collection.AddSingleton(deviceInfo);
+
+        // Pixel geometry comes from the registry entry rather than from IDeviceService.Device:
+        // the device object is created on a background thread and stays null for seconds after
+        // start-up (forever without hardware), while services are resolved immediately.
+        collection.AddSingleton(deviceInfo.Geometry);
+
+        // Re-expose the root singletons device-bound services depend on.
+        collection.Forward<IConfigService>(root);
+        collection.Forward<IAssetService>(root);
+        collection.Forward<IIconPackService>(root);
+        collection.Forward<IAutostartService>(root);
+        collection.Forward<IAppDiscoveryService>(root);
+        collection.Forward<IAppIconExtractor>(root);
+        collection.Forward<ICustomAppStore>(root);
+        collection.Forward<IDBusController>(root);
+        collection.Forward<ILinuxDiagnosticsService>(root);
+        collection.Forward<IInteractiveDiagnosticTests>(root);
+        collection.Forward<Services.Updates.IUpdateService>(root);
+        collection.Forward<Services.Updates.IUpdateInstaller>(root);
+        collection.Forward<Services.PluginStore.IPluginStoreService>(root);
+        collection.Forward<ICommandRunner>(root);
+        collection.Forward<ISystemPowerService>(root);
+        collection.Forward<IActiveWindowMonitor>(root);
+        collection.Forward<IActiveWindowState>(root);
+        collection.Forward<IMacroConditionEvaluator>(root);
+        collection.Forward<IMacroExecutionRegistry>(root);
+        collection.Forward<IMacroPromptService>(root);
+        collection.Forward<IMacroManager>(root);
+        collection.Forward<IDialPresetStore>(root);
+        collection.Forward<IMacroStopCoordinator>(root);
+        collection.Forward<IButtonClipboardService>(root);
+        collection.Forward<IDeviceHostRegistry>(root);
+        collection.Forward<IDeviceRouter>(root);
+        collection.Forward<IPluginManager>(root);
+        collection.Forward<Services.Companion.ICompanionCoordinator>(root);
+        collection.Forward<Services.Companion.ICompanionContextSync>(root);
+        collection.Forward<Services.Companion.ICompanionNavigation>(root);
+        collection.Forward<Services.Animation.IAnimatedImageCache>(root);
+        collection.Forward<Services.Animation.IAnimatedImageImporter>(root);
+
+        // OS input injection. Device-bound because the Windows routers read this
+        // device's LoupedeckConfig.InterceptionEnabled to pick SendInput vs the
+        // Interception driver per call.
+        if (OperatingSystem.IsLinux())
+        {
+            collection.AddSingleton<IUInputKeyboard, UInputKeyboard>();
+            // No Interception on Linux — register a stand-in so SettingsViewModel still resolves.
+            collection.AddSingleton<IInterceptionService, NoOpInterceptionService>();
+
+            // Virtual mouse for macro mouse steps (uinput-backed).
+            collection.AddSingleton<IVirtualMouse, UInputMouse>();
+
+            // Global keyboard recorder for the macro editor (evdev /dev/input/event*).
+            collection.AddSingleton<IInputRecorder, LinuxInputRecorder>();
+        }
+        else
+        {
+            // Two concrete keyboard backends plus a router that picks between them per call:
+            // SendInput (always works) and Interception (kernel driver, reaches raw-input apps).
+            collection.AddSingleton<WindowsUInputKeyboard>();
+            collection.AddSingleton<InterceptionKeyboard>();
+            collection.AddSingleton<IUInputKeyboard, WindowsKeyboardRouter>();
+
+            // Manages downloading/installing/uninstalling the Interception driver (settings page).
+            collection.AddSingleton<IInterceptionService, InterceptionService>();
+
+            // Virtual mouse for macro mouse steps — same backend split as the keyboard:
+            // SendInput (always works) and Interception, picked per call by a router.
+            collection.AddSingleton<WindowsVirtualMouse>();
+            collection.AddSingleton<InterceptionMouse>();
+            collection.AddSingleton<IVirtualMouse, WindowsMouseRouter>();
+
+            // Global keyboard recorder for the macro editor (low-level hook).
+            collection.AddSingleton<IInputRecorder, WindowsInputRecorder>();
+        }
+
+        collection.AddSingleton(provider =>
+        {
+            var configService = provider.GetRequiredService<IConfigService>();
+            var configPath = FileDialogHelper.GetConfigPath(deviceInfo, resolved.Serial);
+            var config = configService.LoadConfig<LoupedeckConfig>(configPath);
+            if (config == null)
+            {
+                config = new LoupedeckConfig
+                {
+                    DeviceVid = deviceInfo.VendorId,
+                    DevicePid = deviceInfo.ProductId,
+                    DeviceSerial = resolved.Serial
+                };
+
+                // First launch for this device — seed the serial port/baud from any
+                // existing sibling config so the user keeps their setup
+                // just because they switched device type (the port is hardware, not
+                // device-type-specific). Crucial for the LOUPIXDECK_FAKE_DEVICE flow:
+                // without this the fresh config has no port → device times out →
+                // App.InitializeDevices catches and shuts down silently.
+                SeedSerialPortFromSibling(config, configService, deviceInfo);
+            }
+
+            // A companion mirrors its master's profiles and workspaces; a device that left its group
+            // gets its own back. Done before the defaults below so the launch starts on the right set.
+            var companions = provider.GetRequiredService<Services.Companion.ICompanionCoordinator>();
+            var masterKey = companions.GetMasterKey(resolved.ScopeKey);
+            if (masterKey != null || config.CompanionLink != null)
+            {
+                Services.Companion.CompanionStructureSync.Apply(config, masterKey,
+                    masterKey == null ? null : companions.GetDeviceConfig(masterKey));
+            }
+
+            // Guarantee a resolvable active profile/workspace (issue #132): a fresh config gets a
+            // Default profile with a Home workspace; a migrated config already has one and is left
+            // as is. Also binds the active-workspace facade so the page properties resolve.
+            config.EnsureDefaultProfile();
+
+            // Panel geometry is not persisted — re-attach it on every load so the static
+            // renderers size wallpapers to this device's panel rather than a fixed 480x270.
+            config.ApplyDeviceGeometry(deviceInfo.Geometry);
+            return config;
+        });
+
+        collection.AddSingleton<IDeviceService, LoupedeckDeviceService>();
+        collection.AddSingleton<IPageManager, PageManager>();
+        collection.AddSingleton<IWorkspaceActivationService, WorkspaceActivationService>();
+        collection.AddSingleton<IProfileEditingService, ProfileEditingService>();
+        collection.AddSingleton<Services.Folders.ICustomFolderService, Services.Folders.CustomFolderService>();
+        collection.AddSingleton<Services.Companion.ICommandLockService, Services.Companion.CommandLockService>();
+
+        // Command catalog — device-scoped so command activation
+        // (SysCommandService → ActivatorUtilities.CreateInstance(this provider))
+        // resolves the device-bound services commands inject.
+        collection.AddSingleton<ICommandService, CommandService>();
+        collection.AddSingleton<ICommandBuilder, CommandBuilder>();
+        collection.AddSingleton<ISysCommandService, SysCommandService>();
+        collection.AddSingleton<ICommandProvider, CoreCommandProvider>();
+        collection.AddSingleton<ICommandProvider, PluginCommandProvider>();
+        collection.AddSingleton<ICommandRegistry, CommandRegistry>();
+
+        // Rewrites this device's rotary bindings onto the commands a plugin replaced them with.
+        // Device-scoped because it resolves against this device's registry and config.
+        collection
+            .AddSingleton<Services.Migrations.IPluginCommandMigrationRunner,
+                Services.Migrations.PluginCommandMigrationRunner>();
+
+        // Resolves per-category card metadata (section/icon/description) for the
+        // command picker, from core [CommandGroup] attributes and plugin descriptors.
+        collection.AddSingleton<IGroupCatalog, GroupCatalog>();
+
+        // The command-selection menu is assembled generically from these contributors.
+        collection.AddSingleton<IMenuContributor, CommandGroupMenuContributor>();
+        collection.AddSingleton<IMenuContributor, UserMacroMenuContributor>();
+        collection.AddSingleton<IMenuContributor, ProfileMenuContributor>();
+        collection.AddSingleton<IMenuContributor, CompanionMenuContributor>();
+        collection.AddSingleton<IMenuContributor, DisplayTestMenuContributor>();
+        collection.AddSingleton<IMenuContributor, DialPresetMenuContributor>();
+        collection.AddSingleton<IPluginMenuSource, PluginMenuContributor>();
+        collection.AddSingleton<IMenuTreeBuilder, MenuTreeBuilder>();
+
+        // Dial presets the plugins enabled on this device contribute through the SDK.
+        collection.AddSingleton<IPluginDialPresetSource, PluginDialPresetSource>();
+
+        // Built-in dial presets this device can run, plus the plugins' and the user's own.
+        collection.AddSingleton<IDialPresetCatalog, DialPresetCatalog>();
+
+        // Sequential macro-step executor (uses this device's command service).
+        collection.AddSingleton<MacroRunner>();
+
+        // Per-device plugin state: side-strip attachment and screensaver sources (both read
+        // the shared root plugin list), install/enable, hot-reload.
+        collection.AddSingleton<ISideStripProviderRegistry, SideStripProviderRegistry>();
+        collection.AddSingleton<IScreensaverProviderRegistry, ScreensaverProviderRegistry>();
+        collection.AddSingleton<IPluginInstaller, PluginInstaller>();
+        collection.AddSingleton<IPluginReloadService, PluginReloadService>();
+
+        // One central animation loop per device (issue #119): every animated feature
+        // registers here instead of owning its own timer, so the device has a single,
+        // globally rate-limitable render cadence that pauses for inactive pages.
+        collection.AddSingleton<Services.Animation.IAnimationScheduler, Services.Animation.AnimationScheduler>();
+
+        // Idle-driven full-display screensaver (issue #120): plays a video/GIF via ffmpeg
+        // across all displays after an idle period, registering as a source on the scheduler.
+        collection.AddSingleton<Services.Screensaver.IScreensaverManager, Services.Screensaver.ScreensaverManager>();
+
+        collection.AddSingleton<IDynamicTextManager, DynamicTextManager>();
+
+        // Lets plugins query/set the active state of stateful touch buttons (issue #131).
+        collection.AddSingleton<IButtonStateService, ButtonStateService>();
+
+        // Creates/releases the button states a command declares for itself.
+        collection.AddSingleton<Services.Commands.ICommandStateMaterializer, Services.Commands.CommandStateMaterializer>();
+
+        // Per-button animations (issue #121): one source per device on the central scheduler,
+        // driving animated image layers and animated plugin commands.
+        collection.AddSingleton<Services.Animation.IButtonAnimationManager, Services.Animation.ButtonAnimationManager>();
+
+        // Animated side-display content (issue #123): one source per device on the central scheduler,
+        // driving animated image layers on the FreeDraw side-strip canvases.
+        collection.AddSingleton<Services.Animation.ISideDisplayAnimationManager, Services.Animation.SideDisplayAnimationManager>();
+
+        // Video page wallpaper: one source per device on the central scheduler, playing the active
+        // page's clip behind the keys. Idle unless a page's main wallpaper slot references one.
+        collection.AddSingleton<Services.Animation.IWallpaperAnimationManager, Services.Animation.WallpaperAnimationManager>();
+
+        collection.AddSingleton<IFolderNavigationService, FolderNavigationService>();
+        collection.AddSingleton<IExclusiveModeService, ExclusiveModeService>();
+
+        // Portable .loupixprofile packages (issue #133): export/import of a profile,
+        // workspace or page. Device-scoped — it needs this device's config and geometry.
+        collection.AddSingleton<Services.Portable.IProfilePackageService, Services.Portable.ProfilePackageService>();
+
+        // Plugin full-display raw-BGRA renderer (issue #124): single-owner, drives a plugin
+        // IFullDisplayRenderer on the central scheduler for high-throughput full-screen content
+        // (e.g. video streaming) that Exclusive Mode's per-slot PNG tiles can't sustain.
+        collection.AddSingleton<IFullDisplayRenderService, FullDisplayRenderService>();
+        collection.AddSingleton<INativeHapticService, NativeHapticService>();
+        collection.AddSingleton<IAppSwitchingService, AppSwitchingService>();
+
+        collection.AddSingleton<LoupedeckLiveSController>();
+        collection.AddSingleton<IDeviceController>(sp => sp.GetRequiredService<LoupedeckLiveSController>());
+
+        // The apps/actions side panel. One per device because it holds that device's command
+        // catalogue and its own open state, while the scan behind it is a shared root singleton.
+        collection.AddSingleton<ViewModels.ActionPanel.ActionPanelViewModel>();
+        collection.AddSingleton<ViewModels.FolderPanel.FolderPanelViewModel>();
+        collection.AddSingleton<ViewModels.DialQuickMenuViewModel>();
+        collection.AddSingleton<ViewModels.ProfileHeaderMenuViewModel>();
+        collection.AddSingleton<Services.Actions.IPanelAssignmentService, Services.Actions.PanelAssignmentService>();
+
+        collection.AddTransient<MainWindowViewModel>();
+
+        InitDialogs(collection);
+    }
+
+    private static void SeedSerialPortFromSibling(LoupedeckConfig fresh, IConfigService configService,
+        DeviceRegistry.DeviceInfo self)
+    {
+        try
+        {
+            var candidates = DeviceRegistry.SupportedDevices
+                .Where(d => d.Slug != self.Slug)
+                .Select(static d => FileDialogHelper.GetConfigPath(d))
+                .Where(File.Exists)
+                .OrderByDescending(File.GetLastWriteTimeUtc)
+                .ToList();
+
+            foreach (var path in candidates)
+            {
+                var sibling = configService.LoadConfig<LoupedeckConfig>(path);
+                if (sibling == null || string.IsNullOrEmpty(sibling.DevicePort)) continue;
+                fresh.DevicePort = sibling.DevicePort;
+                fresh.DeviceBaudrate = sibling.DeviceBaudrate;
+                Console.WriteLine($"[Config] Seeded {self.Slug} port from sibling: {sibling.DevicePort} @ {sibling.DeviceBaudrate}");
+                return;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[Config] Sibling-port seed failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>The OS-level suspend/resume source, or a no-op on platforms without one.</summary>
+    private static ISystemPowerService CreatePlatformPowerService()
+    {
+        if (OperatingSystem.IsLinux())
+            return new LinuxSystemPowerService();
+#if WINDOWS
+        if (OperatingSystem.IsWindows())
+            return new WindowsSystemPowerService();
+#endif
+        return new NoOpSystemPowerService();
+    }
+
+    private static void InitDialogs(IServiceCollection collection)
+    {
+        collection.AddTransient<SimpleButtonSettings>();
+        collection.AddTransient<SimpleButtonSettingsViewModel>();
+
+        collection.AddTransient<RotaryButtonSettings>();
+        collection.AddTransient<RotaryButtonSettingsViewModel>();
+
+        collection.AddTransient<TouchButtonSettings>();
+        collection.AddTransient<TouchButtonSettingsViewModel>();
+
+        collection.AddTransient<SymbolPicker>();
+        collection.AddTransient<SymbolPickerViewModel>();
+
+        collection.AddTransient<KeyCapture>();
+        collection.AddTransient<KeyCaptureViewModel>();
+
+        collection.AddTransient<AppPicker>();
+        collection.AddTransient<AppPickerViewModel>();
+
+        collection.AddTransient<TouchPageWallpaperSettings>();
+        collection.AddTransient<TouchPageWallpaperSettingsViewModel>();
+
+        collection.AddTransient<PageCommandsSettings>();
+        collection.AddTransient<PageCommandsSettingsViewModel>();
+
+        collection.AddTransient<Settings>();
+        collection.AddTransient<LinuxDiagnosticsViewModel>();
+        collection.AddTransient<SettingsViewModel>();
+        collection.AddTransient<DiagnosticReportViewModel>();
+        collection.AddTransient<DiagnosticReportDialog>();
+
+        collection.AddTransient<MacroEditor>();
+        collection.AddTransient<MacroEditorViewModel>();
+
+        collection.AddTransient<About>();
+        collection.AddTransient<AboutViewModel>();
+
+        collection.AddTransient<UpdateDialog>();
+        collection.AddTransient<UpdateDialogViewModel>();
+
+        collection.AddTransient<PluginsWindow>();
+        collection.AddTransient<PluginsWindowViewModel>();
+        collection.AddTransient<PluginStoreViewModel>();
+        collection.AddTransient<PluginReleaseNotesDialog>();
+        collection.AddTransient<PluginReleaseNotesViewModel>();
+
+        collection.AddTransient<DialPresetEditor>();
+        collection.AddTransient<DialPresetEditorViewModel>();
+
+        collection.AddTransient<ConfirmDialog>();
+        collection.AddTransient<ConfirmDialogViewModel>();
+
+        collection.AddTransient<TextInputDialog>();
+        collection.AddTransient<TextInputDialogViewModel>();
+
+        collection.AddTransient<ProfileImport>();
+        collection.AddTransient<ProfileImportViewModel>();
+
+        collection.AddTransient<LoupedeckImport>();
+        collection.AddTransient<LoupedeckImportViewModel>();
+
+        collection.AddTransient<ProfileExport>();
+        collection.AddTransient<ProfileExportViewModel>();
+
+        collection.AddSingleton<IDialogService, DialogService>();
+    }
+
+    /// <summary>Root-level one-time init: shared macro store + the static bitmap
+    /// renderer's asset resolver. Runs once on the root provider.</summary>
+    public static void RootPostInit(this IServiceProvider root)
+    {
+        // Load user macros once — execution and menus read from memory afterwards.
+        root.GetRequiredService<IMacroManager>().Load();
+
+        // Same for the user's dial presets.
+        root.GetRequiredService<IDialPresetStore>().Load();
+
+        // Begin listening for the global stop hotkey (no-op until one is configured).
+        root.GetRequiredService<IMacroStopHotkeyService>().Start();
+
+        // Eagerly create the active-window cache so it subscribes to (and starts) the monitor
+        // from launch — otherwise it would miss every focus change before the first macro runs.
+        root.GetRequiredService<IActiveWindowState>();
+
+        // Eagerly create the companion coordinator so it observes every device host from the
+        // first registration on (it hooks each host's connect event to report readiness).
+        root.GetRequiredService<Services.Companion.ICompanionCoordinator>();
+
+        // Same for the context sync, which listens to group changes and master saves from then on.
+        root.GetRequiredService<Services.Companion.ICompanionContextSync>();
+
+        // Let the (static) bitmap renderer resolve image-layer assets via DI.
+        var assetService = root.GetRequiredService<IAssetService>();
+        BitmapHelper.AssetResolver = assetService.Load;
+    }
+
+    /// <summary>Per-device one-time init: dialog registration, haptic materialization,
+    /// config self-heal, layer-handler rewiring. Runs on each device provider.</summary>
+    public static void DevicePostInit(this IServiceProvider services)
+    {
+        var dialogService = services.GetRequiredService<IDialogService>();
+
+        dialogService.Register<SimpleButtonSettingsViewModel, SimpleButtonSettings>();
+        dialogService.Register<RotaryButtonSettingsViewModel, RotaryButtonSettings>();
+        dialogService.Register<TouchButtonSettingsViewModel, TouchButtonSettings>();
+        dialogService.Register<SymbolPickerViewModel, SymbolPicker>();
+        dialogService.Register<KeyCaptureViewModel, KeyCapture>();
+        dialogService.Register<AppPickerViewModel, AppPicker>();
+        dialogService.Register<TouchPageWallpaperSettingsViewModel, TouchPageWallpaperSettings>();
+        dialogService.Register<PageCommandsSettingsViewModel, PageCommandsSettings>();
+        dialogService.Register<SettingsViewModel, Settings>();
+        dialogService.Register<PluginsWindowViewModel, PluginsWindow>();
+        dialogService.Register<DiagnosticReportViewModel, DiagnosticReportDialog>();
+        dialogService.Register<MacroEditorViewModel, MacroEditor>();
+        dialogService.Register<DialPresetEditorViewModel, DialPresetEditor>();
+        dialogService.Register<AboutViewModel, About>();
+        dialogService.Register<UpdateDialogViewModel, UpdateDialog>();
+        dialogService.Register<PluginReleaseNotesViewModel, PluginReleaseNotesDialog>();
+        dialogService.Register<ConfirmDialogViewModel, ConfirmDialog>();
+        dialogService.Register<TextInputDialogViewModel, TextInputDialog>();
+        dialogService.Register<ProfileImportViewModel, ProfileImport>();
+        dialogService.Register<LoupedeckImportViewModel, LoupedeckImport>();
+        dialogService.Register<ProfileExportViewModel, ProfileExport>();
+
+        // Heal configs that were saved before HapticSteps had ObjectCreationHandling.Replace —
+        // those files accumulated duplicate steps on every save+load round.
+        var hapticConfig = services.GetRequiredService<LoupedeckConfig>();
+        while (hapticConfig.HapticSteps.Count > SettingsViewModel.MaxHapticSteps)
+            hapticConfig.HapticSteps.RemoveAt(hapticConfig.HapticSteps.Count - 1);
+        if (hapticConfig.HapticSteps.Count == 0)
+            hapticConfig.HapticSteps.Add(new HapticStep());
+
+        // Materialize the haptic service so it subscribes to config/page events,
+        // and push the persisted config to the device once it's connected.
+        services.GetRequiredService<INativeHapticService>().Apply();
+
+        // After config load, rewire per-layer PropertyChanged handlers so edits
+        // trigger TouchButton.Refresh(). The collection setter in TouchButton
+        // wires its own CollectionChanged hook, but layers created by the JSON
+        // converter bypass AttachLayerHandlers.
+        var config = services.GetRequiredService<LoupedeckConfig>();
+        if (config.ActiveWorkspace != null)
+        {
+            foreach (var page in config.ActiveWorkspace.EnumerateTouchLayouts())
+            {
+                if (page?.TouchButtons == null) continue;
+                foreach (var button in page.TouchButtons)
+                {
+                    button?.RewireLayerHandlers();
+                }
+            }
+        }
+
+        // Normalize each LED button's active state + command mirror after load (no layers).
+        // Every profile, not just the active one: since v12 each profile owns its own set, and a
+        // button first touched after a profile switch would otherwise run unnormalized.
+        foreach (Profile profile in config.Profiles ?? [])
+        {
+            foreach (SimpleButton button in profile?.SimpleButtons ?? [])
+                button?.RewireAfterLoad();
+        }
+    }
+}

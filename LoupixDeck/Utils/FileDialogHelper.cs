@@ -1,0 +1,413 @@
+using Avalonia.Controls;
+using Avalonia.Platform.Storage;
+using LoupixDeck.Localization;
+using LoupixDeck.Models.Portable;
+
+namespace LoupixDeck.Utils;
+
+public abstract class FileDialogHelper
+{
+    public static async Task<string> OpenFileDialog()
+    {
+        var parent = WindowHelper.GetMainWindow();
+        if (parent == null) return null;
+
+        var files = await parent.StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+        {
+            Title = "Select Image File",
+            AllowMultiple = false,
+            FileTypeFilter = new List<FilePickerFileType>
+            {
+                new("Pictures")
+                {
+                    Patterns = ["*.png", "*.jpg", "*.jpeg", "*.bmp", "*.tif", "*.tiff", "*.svg"]
+                },
+                new("All files")
+                {
+                    Patterns = ["*"]
+                }
+            }
+        });
+        
+        if (files.Count == 0) return string.Empty;
+        
+        return Uri.UnescapeDataString(files[0].Path.AbsolutePath);
+    }
+
+    /// <summary>
+    /// Picks a folder, parented to the active window so it opens above a modal dialog. Returns the
+    /// local path, an empty string if cancelled or the folder has no local path, or null when there
+    /// is no window.
+    /// </summary>
+    public static async Task<string> OpenFolderDialog(string title)
+    {
+        Window parent = WindowHelper.GetActiveWindow();
+        if (parent == null) return null;
+
+        IReadOnlyList<IStorageFolder> folders = await parent.StorageProvider.OpenFolderPickerAsync(
+            new FolderPickerOpenOptions
+            {
+                Title = title,
+                AllowMultiple = false
+            });
+
+        return folders.Count == 0 ? string.Empty : folders[0].TryGetLocalPath() ?? string.Empty;
+    }
+
+    /// <summary>
+    /// Picks a page wallpaper — a still image or a video clip, in one dialog, because a slot holds
+    /// one or the other and never both. The caller tells them apart by extension. Returns the
+    /// absolute path, an empty string if cancelled, or null when there's no window.
+    /// </summary>
+    public static async Task<string> OpenWallpaperMediaDialog()
+    {
+        var parent = WindowHelper.GetMainWindow();
+        if (parent == null) return null;
+
+        var files = await parent.StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+        {
+            Title = "Select Wallpaper Image or Video",
+            AllowMultiple = false,
+            FileTypeFilter = new List<FilePickerFileType>
+            {
+                new("Images and video")
+                {
+                    Patterns =
+                    [
+                        "*.png", "*.jpg", "*.jpeg", "*.bmp", "*.tif", "*.tiff",
+                        "*.mp4", "*.webm", "*.mov", "*.mkv", "*.m4v", "*.avi"
+                    ]
+                },
+                new("Pictures")
+                {
+                    Patterns = ["*.png", "*.jpg", "*.jpeg", "*.bmp", "*.tif", "*.tiff"]
+                },
+                new("Videos")
+                {
+                    Patterns = ["*.mp4", "*.webm", "*.mov", "*.mkv", "*.m4v", "*.avi"]
+                },
+                new("All files")
+                {
+                    Patterns = ["*"]
+                }
+            }
+        });
+
+        if (files.Count == 0) return string.Empty;
+
+        return Uri.UnescapeDataString(files[0].Path.AbsolutePath);
+    }
+
+    /// <summary>
+    /// Picks an animated source for a button (issue #121): an animated image (GIF/WebP) or a video
+    /// (transcoded once on import). Returns the absolute path, an empty string if cancelled, or null
+    /// when there's no window.
+    /// </summary>
+    public static async Task<string> OpenAnimatedImageDialog()
+    {
+        var parent = WindowHelper.GetMainWindow();
+        if (parent == null) return null;
+
+        var files = await parent.StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+        {
+            Title = "Select Animated Image or Video",
+            AllowMultiple = false,
+            FileTypeFilter = new List<FilePickerFileType>
+            {
+                new("Animated images & videos")
+                {
+                    Patterns = ["*.gif", "*.webp", "*.mp4", "*.webm", "*.mov", "*.mkv", "*.m4v", "*.avi"]
+                },
+                new("All files")
+                {
+                    Patterns = ["*"]
+                }
+            }
+        });
+
+        if (files.Count == 0) return string.Empty;
+
+        var file = files[0];
+        var local = file.TryGetLocalPath();
+        return !string.IsNullOrEmpty(local)
+            ? local
+            : Uri.UnescapeDataString(file.Path.AbsolutePath);
+    }
+
+    /// <summary>
+    /// Picks a screensaver clip (video or animated GIF). Parented to <paramref name="owner"/>
+    /// when given (the open settings dialog), falling back to the main window. Returns the
+    /// absolute path, an empty string if cancelled, or null when there's no window.
+    /// </summary>
+    public static async Task<string> OpenVideoDialog(Window owner = null)
+    {
+        owner ??= WindowHelper.GetMainWindow();
+        if (owner == null) return null;
+
+        var files = await owner.StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+        {
+            Title = "Select Screensaver Video",
+            AllowMultiple = false,
+            FileTypeFilter = new List<FilePickerFileType>
+            {
+                new("Videos")
+                {
+                    Patterns = ["*.mp4", "*.webm", "*.mov", "*.mkv", "*.m4v", "*.avi", "*.gif"]
+                },
+                new("All files")
+                {
+                    Patterns = ["*"]
+                }
+            }
+        });
+
+        if (files.Count == 0) return string.Empty;
+
+        // Prefer the real OS path (TryGetLocalPath) over the URI's AbsolutePath, which on
+        // Windows yields "/C:/Users/…" — that can fail File.Exists/File.Copy and make the
+        // selection silently do nothing.
+        var file = files[0];
+        var local = file.TryGetLocalPath();
+        return !string.IsNullOrEmpty(local)
+            ? local
+            : Uri.UnescapeDataString(file.Path.AbsolutePath);
+    }
+
+    /// <summary>
+    /// Picks a <c>.zip</c> plugin package. Parented to <paramref name="owner"/> when
+    /// given (the open settings dialog), falling back to the main window. Returns the
+    /// absolute path, an empty string if cancelled, or null when there's no window.
+    /// </summary>
+    public static async Task<string> OpenZipDialog(Window owner = null)
+    {
+        owner ??= WindowHelper.GetMainWindow();
+        if (owner == null) return null;
+
+        var files = await owner.StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+        {
+            Title = "Select Plugin Package",
+            AllowMultiple = false,
+            FileTypeFilter = new List<FilePickerFileType>
+            {
+                new("Plugin package")
+                {
+                    Patterns = ["*.zip"]
+                },
+                new("All files")
+                {
+                    Patterns = ["*"]
+                }
+            }
+        });
+
+        if (files.Count == 0) return string.Empty;
+
+        return Uri.UnescapeDataString(files[0].Path.AbsolutePath);
+    }
+
+    /// <summary>
+    /// Picks a program to add to the apps panel by hand, for anything the scan does not find.
+    /// Returns the absolute path, an empty string if cancelled, or null when there is no window.
+    /// </summary>
+    /// <remarks>
+    /// The filter is per-platform because "a program" is a different thing on each: an executable
+    /// or a shortcut on Windows, a desktop entry or a plain executable file on Linux. Both offer
+    /// "All files" as well, since a launcher can be any file the system knows how to open.
+    /// </remarks>
+    public static async Task<string> OpenApplicationDialog(Window owner = null)
+    {
+        owner ??= WindowHelper.GetMainWindow();
+        if (owner == null) return null;
+
+        FilePickerFileType programs = OperatingSystem.IsWindows()
+            ? new FilePickerFileType("Programs") { Patterns = ["*.exe", "*.lnk", "*.url", "*.bat", "*.cmd"] }
+            : new FilePickerFileType("Programs") { Patterns = ["*.desktop", "*.sh", "*"] };
+
+        IReadOnlyList<IStorageFile> files = await owner.StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+        {
+            Title = "Select Application",
+            AllowMultiple = false,
+            FileTypeFilter = [programs, new FilePickerFileType("All files") { Patterns = ["*"] }]
+        });
+
+        if (files.Count == 0) return string.Empty;
+
+        return ResolveLocalPath(files[0]);
+    }
+
+    /// <summary>
+    /// Picks a Loupedeck profile export (<c>.lp5</c>) to import. Returns the absolute path, an empty
+    /// string if cancelled, or null when there's no window.
+    /// </summary>
+    public static async Task<string> OpenLoupedeckProfileDialog(Window owner = null)
+    {
+        owner ??= WindowHelper.GetMainWindow();
+        if (owner == null) return null;
+
+        IReadOnlyList<IStorageFile> files = await owner.StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+        {
+            Title = Localization.Loc.Tr("LoupedeckImport_Title"),
+            AllowMultiple = false,
+            FileTypeFilter =
+            [
+                new FilePickerFileType("Loupedeck profile") { Patterns = ["*.lp5"] },
+                new FilePickerFileType("All files") { Patterns = ["*"] }
+            ]
+        });
+
+        return files.Count == 0 ? string.Empty : ResolveLocalPath(files[0]);
+    }
+
+    /// <summary>
+    /// Picks a <c>.loupixprofile</c> package to import. Parented to <paramref name="owner"/> when
+    /// given (the open settings dialog), falling back to the main window. Returns the absolute
+    /// path, an empty string if cancelled, or null when there's no window.
+    /// </summary>
+    public static async Task<string> OpenProfilePackageDialog(Window owner = null)
+    {
+        owner ??= WindowHelper.GetMainWindow();
+        if (owner == null) return null;
+
+        IReadOnlyList<IStorageFile> files = await owner.StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+        {
+            Title = "Import Profile Package",
+            AllowMultiple = false,
+            FileTypeFilter =
+            [
+                new FilePickerFileType("LoupixDeck profile package")
+                {
+                    Patterns = [$"*.{ProfilePackageFiles.Extension}"]
+                },
+                new FilePickerFileType("All files")
+                {
+                    Patterns = ["*"]
+                }
+            ]
+        });
+
+        return files.Count == 0 ? string.Empty : ResolveLocalPath(files[0]);
+    }
+
+    /// <summary>
+    /// Asks where to write a <c>.loupixprofile</c> package. Returns the absolute path, an empty
+    /// string if cancelled, or null when there's no window. The picker itself confirms an
+    /// overwrite, so the caller may delete an existing file without asking again.
+    /// </summary>
+    public static async Task<string> SaveProfilePackageDialog(Window owner, string suggestedFileName)
+    {
+        owner ??= WindowHelper.GetMainWindow();
+        if (owner == null) return null;
+
+        IStorageFile file = await owner.StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
+        {
+            Title = "Export Profile Package",
+            SuggestedFileName = suggestedFileName,
+            DefaultExtension = ProfilePackageFiles.Extension,
+            ShowOverwritePrompt = true,
+            FileTypeChoices =
+            [
+                new FilePickerFileType("LoupixDeck profile package")
+                {
+                    Patterns = [$"*.{ProfilePackageFiles.Extension}"]
+                }
+            ]
+        });
+
+        return file == null ? string.Empty : ResolveLocalPath(file);
+    }
+
+    /// <summary>
+    /// Asks where to save a Markdown file. Returns the chosen path, an empty string when the
+    /// user cancelled, or null when there is no window to own the dialog.
+    /// </summary>
+    public static async Task<string> SaveMarkdownDialog(Window owner, string suggestedFileName)
+    {
+        owner ??= WindowHelper.GetActiveWindow() ?? WindowHelper.GetMainWindow();
+        if (owner == null) return null;
+
+        IStorageFile file = await owner.StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
+        {
+            Title = Loc.Tr("Diagnostics_SaveReportTitle"),
+            SuggestedFileName = suggestedFileName,
+            DefaultExtension = "md",
+            ShowOverwritePrompt = true,
+            FileTypeChoices =
+            [
+                new FilePickerFileType(Loc.Tr("Diagnostics_MarkdownFile"))
+                {
+                    Patterns = ["*.md"]
+                }
+            ]
+        });
+
+        return file == null ? string.Empty : ResolveLocalPath(file);
+    }
+
+    /// <summary>
+    /// Builds a file name for a package from an item name. Characters a file name cannot hold are
+    /// replaced, so a profile called "OBS / Stream" does not produce an invalid path.
+    /// </summary>
+    public static string SuggestPackageFileName(string itemName)
+    {
+        string cleaned = string.IsNullOrWhiteSpace(itemName)
+            ? "profile"
+            : new string(itemName.Select(c => Path.GetInvalidFileNameChars().Contains(c) ? '_' : c).ToArray()).Trim();
+
+        if (cleaned.Length == 0)
+            cleaned = "profile";
+
+        return $"{cleaned}.{ProfilePackageFiles.Extension}";
+    }
+
+    /// <summary>
+    /// Prefer the real OS path over the URI's AbsolutePath, which on Windows yields "/C:/Users/…"
+    /// and can silently break File.Exists / File.Copy.
+    /// </summary>
+    private static string ResolveLocalPath(IStorageFile file)
+    {
+        string local = file.TryGetLocalPath();
+        return !string.IsNullOrEmpty(local) ? local : Uri.UnescapeDataString(file.Path.AbsolutePath);
+    }
+
+    public static string GetConfigPath(string fileName)
+    {
+        return Path.Combine(GetConfigDir(), fileName);
+    }
+
+    /// <summary>
+    /// Path to the per-device config file (e.g. config_loupedeck-live-s.json).
+    /// Use this for everything except first-launch detection / legacy migration.
+    /// </summary>
+    public static string GetConfigPath(LoupixDeck.Registry.DeviceRegistry.DeviceInfo deviceInfo)
+    {
+        ArgumentNullException.ThrowIfNull(deviceInfo);
+        return Path.Combine(GetConfigDir(), $"config_{deviceInfo.Slug}.json");
+    }
+
+    /// <summary>
+    /// Path to the config file of one physical device: <c>config_&lt;slug&gt;.json</c>, or
+    /// <c>config_&lt;slug&gt;_&lt;serial&gt;.json</c> only for a further unit of the same model.
+    /// See <see cref="DeviceConfigPath"/>. Use this for everything except first-launch
+    /// detection / legacy migration.
+    /// </summary>
+    public static string GetConfigPath(LoupixDeck.Registry.DeviceRegistry.DeviceInfo deviceInfo, string serial) =>
+        DeviceConfigPath.Resolve(deviceInfo, serial);
+
+    public static string GetConfigDir()
+    {
+        var homePath = Environment.GetEnvironmentVariable("HOME")
+                       ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+#if DEBUG
+        var configDir = Path.Combine(homePath, ".config", "LoupixDeck", "debug");
+#else
+        var configDir = Path.Combine(homePath, ".config", "LoupixDeck");
+#endif
+
+        if (!Directory.Exists(configDir))
+        {
+            Directory.CreateDirectory(configDir);
+        }
+
+        return configDir;
+    }
+}

@@ -1,0 +1,1051 @@
+using System.Collections.Concurrent;
+using LoupixDeck.Localization;
+using LoupixDeck.PluginSdk;
+using LoupixDeck.Registry;
+using Microsoft.Extensions.DependencyInjection;
+using Newtonsoft.Json;
+using SdkDeviceInfo = LoupixDeck.PluginSdk.DeviceInfo;
+
+namespace LoupixDeck.Services.Plugins;
+
+/// <summary>
+/// Discovers, loads and initializes plugins from the bundled <c>plugins/</c>
+/// directory next to the application and from the user <c>plugins/</c> directory
+/// in the config folder (<c>~/.config/LoupixDeck/plugins</c>). Each plugin is
+/// isolated in its own collectible
+/// <see cref="PluginLoadContext"/>; a failure in one plugin never prevents the
+/// app — or the other plugins — from starting.
+/// </summary>
+public interface IPluginManager
+{
+    /// <summary>All discovered plugins, including failed/incompatible ones.</summary>
+    IReadOnlyList<LoadedPlugin> Plugins { get; }
+
+    /// <summary>Scans the plugins directory and loads every discovered plugin.</summary>
+    void LoadPlugins();
+
+    /// <summary>
+    /// Loads (or reloads) a single plugin by id at runtime, replacing any existing
+    /// entry with the same id. Honours the same enable/platform/SDK gates as the
+    /// bulk load, so a disabled plugin yields a <see cref="PluginLoadStatus.Disabled"/>
+    /// entry without creating a load context. UI thread only. Returns the resulting
+    /// <see cref="LoadedPlugin"/>, or null when no manifest is found for the id.
+    /// </summary>
+    LoadedPlugin LoadPlugin(string pluginId);
+
+    /// <summary>
+    /// Shuts down and unloads a single plugin by id, dropping it from
+    /// <see cref="Plugins"/>. The collectible context unload is best-effort — actual
+    /// collection (and file-lock release) is not guaranteed. UI thread only.
+    /// Returns true when an unload was requested.
+    /// </summary>
+    bool UnloadPlugin(string pluginId);
+
+    /// <summary>
+    /// True when ANY running device enables <paramref name="pluginId"/>. Plugins are loaded
+    /// once for the whole process, so this — not one device's config — decides whether the
+    /// plugin has to be loaded at all.
+    /// </summary>
+    bool IsEnabledOnAnyDevice(string pluginId);
+
+    /// <summary>Shuts down every loaded plugin and unloads its context.</summary>
+    void ShutdownAll();
+
+    /// <summary>
+    /// Asks every loaded plugin that implements <see cref="IPluginRequirements"/> for its
+    /// requirements and stores the result on <see cref="LoadedPlugin.Requirements"/>. Runs on a
+    /// worker thread so a slow probe (for example starting a process) never blocks the caller,
+    /// and never throws. Raises <see cref="RequirementsChanged"/> when the outcome differs from
+    /// the previous evaluation.
+    /// </summary>
+    Task RefreshRequirementsAsync();
+
+    /// <summary>
+    /// Raised after a refresh changed the requirements of at least one plugin. May fire on a
+    /// worker thread; UI subscribers must marshal to the UI thread.
+    /// </summary>
+    event Action RequirementsChanged;
+}
+
+/// <inheritdoc cref="IPluginManager"/>
+public class PluginManager : IPluginManager
+{
+    // Root-resident (issue #116 phase 2): plugins are loaded once. Host delegates
+    // reach the device that triggered the call through the router (ambient device
+    // during a dispatch/input flow, else the primary). See IDeviceRouter.
+    private readonly IDeviceRouter _router;
+
+    // Every running device's host — used to read the union of per-device enabled sets
+    // (see IsEnabled). Plugins are shared/loaded once, so a plugin enabled on ANY
+    // device must load, not only the primary.
+    private readonly IDeviceHostRegistry _hostRegistry;
+
+    // Copy-on-write snapshot. Every mutation builds a new list and swaps this
+    // reference, so readers (e.g. PluginCommandProvider during a registry rebuild)
+    // always see a consistent, immutable list — never a torn mid-mutation state.
+    private volatile IReadOnlyList<LoadedPlugin> _plugins = Array.Empty<LoadedPlugin>();
+
+    // Full-display render sessions (issue #124) handed out per plugin id. Purely a teardown safety
+    // net: a well-behaved plugin releases its session in Shutdown, but if it doesn't, the renderer
+    // would keep being ticked by the scheduler after its collectible load context is unloaded.
+    // Releasing is idempotent, so force-releasing an already-released session is a no-op.
+    private readonly ConcurrentDictionary<string, List<IFullDisplayRenderSession>> _fullDisplaySessions =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    private readonly PluginStore.IPluginCommandIndex _commandIndex;
+
+    // Serializes refreshes so two overlapping calls (page open + Doctor run) cannot interleave.
+    private readonly SemaphoreSlim _requirementsGate = new(1, 1);
+
+    public event Action RequirementsChanged;
+
+    public PluginManager(IDeviceRouter router, IDeviceHostRegistry hostRegistry,
+        PluginStore.IPluginCommandIndex commandIndex)
+    {
+        _router = router;
+        _hostRegistry = hostRegistry;
+        _commandIndex = commandIndex;
+    }
+
+    private void RecordCommands(string pluginId, IEnumerable<IPluginCommand> commands)
+    {
+        try
+        {
+            _commandIndex.Record(pluginId, commands.Select(c => c.Descriptor?.CommandName).ToList());
+        }
+        catch (Exception ex)
+        {
+            // A plugin's own descriptor getter may throw; the index is a convenience, never a load blocker.
+            Console.WriteLine($"PluginManager: could not index the commands of '{pluginId}': {ex.Message}");
+        }
+    }
+
+    /// <summary>The provider of the device this host call should act on.</summary>
+    private IServiceProvider Device => _router.Current
+        ?? throw new InvalidOperationException(
+            "PluginManager used before the device router's default was set.");
+
+    public IReadOnlyList<LoadedPlugin> Plugins => _plugins;
+
+    /// <summary>Builds a new plugin list from the current snapshot and publishes it.</summary>
+    private void ReplacePlugins(Action<List<LoadedPlugin>> mutate)
+    {
+        var next = new List<LoadedPlugin>(_plugins);
+        mutate(next);
+        _plugins = next; // atomic reference swap
+    }
+
+    /// <summary>
+    /// The bundled root next to the executable, and the user plugins root. Public because the
+    /// Linux diagnostics report on both roots and must look at the same two paths the loader
+    /// uses, not at a second copy of the rule (issue #258).
+    /// </summary>
+    public static (string Bundled, string User) GetPluginRoots() =>
+        (Path.Combine(AppContext.BaseDirectory, "plugins"),
+            Path.Combine(Utils.FileDialogHelper.GetConfigDir(), "plugins"));
+
+    /// <summary>One plugin folder found under a discovery root.</summary>
+    private sealed record PluginCandidate(
+        string Directory,
+        string ManifestPath,
+        string Id,
+        string VersionText,
+        Version Version,
+        bool IsBundled);
+
+    /// <summary>
+    /// The copy of one plugin id that actually gets loaded, plus the bundled copy it
+    /// shadows (null unless a user copy overrides a bundled plugin).
+    /// </summary>
+    private sealed record ResolvedPlugin(PluginCandidate Winner, PluginCandidate ShadowedBundled);
+
+    /// <summary>
+    /// Reads the manifests under <paramref name="root"/>. Folders whose manifest has
+    /// no readable id land in <paramref name="unidentified"/> — they cannot collide
+    /// with anything, and loading them still surfaces the failure in the UI.
+    /// </summary>
+    private static void ScanRoot(
+        string root,
+        bool isBundled,
+        Dictionary<string, PluginCandidate> byId,
+        List<PluginCandidate> unidentified)
+    {
+        if (!Directory.Exists(root))
+        {
+            Console.WriteLine($"PluginManager: no plugins directory at '{root}'.");
+            return;
+        }
+
+        foreach (string dir in Directory.GetDirectories(root))
+        {
+            string manifestPath = Path.Combine(dir, "plugin.json");
+            if (!File.Exists(manifestPath))
+                continue;
+
+            PluginManifest manifest = null;
+            try
+            {
+                manifest = JsonConvert.DeserializeObject<PluginManifest>(File.ReadAllText(manifestPath));
+            }
+            catch
+            {
+                // Left to LoadOne, which reports it as a Failed entry.
+            }
+
+            string id = manifest?.Id;
+            PluginCandidate candidate = new(
+                dir, manifestPath, id, manifest?.Version,
+                PluginInstaller.ParseVersion(manifest?.Version), isBundled);
+
+            if (string.IsNullOrWhiteSpace(id))
+            {
+                unidentified.Add(candidate);
+                continue;
+            }
+
+            // Two folders in the same root claiming one id: keep the first.
+            byId.TryAdd(id, candidate);
+        }
+    }
+
+    /// <summary>
+    /// Resolves every discovered plugin id to the copy that wins. A user copy
+    /// overrides a bundled plugin of the same id when its version is greater or
+    /// equal, so an app update shipping a newer bundled version supersedes a stale
+    /// override automatically. The bundled copy is never written to — it simply
+    /// stays in place as the fallback once the override is removed.
+    /// </summary>
+    private static List<ResolvedPlugin> ResolvePlugins()
+    {
+        (string bundledRoot, string userRoot) = GetPluginRoots();
+
+        Dictionary<string, PluginCandidate> bundled = new(StringComparer.OrdinalIgnoreCase);
+        Dictionary<string, PluginCandidate> user = new(StringComparer.OrdinalIgnoreCase);
+        List<PluginCandidate> unidentified = [];
+
+        ScanRoot(bundledRoot, isBundled: true, bundled, unidentified);
+        ScanRoot(userRoot, isBundled: false, user, unidentified);
+
+        List<ResolvedPlugin> resolved = [];
+
+        foreach ((string id, PluginCandidate bundledCandidate) in bundled)
+        {
+            if (!user.TryGetValue(id, out PluginCandidate userCandidate))
+            {
+                resolved.Add(new ResolvedPlugin(bundledCandidate, null));
+                continue;
+            }
+
+            if (userCandidate.Version >= bundledCandidate.Version)
+            {
+                Console.WriteLine(
+                    $"PluginManager: '{id}' v{userCandidate.VersionText} in the user folder overrides " +
+                    $"the built-in v{bundledCandidate.VersionText}.");
+                resolved.Add(new ResolvedPlugin(userCandidate, bundledCandidate));
+            }
+            else
+            {
+                Console.WriteLine(
+                    $"PluginManager: ignoring '{id}' v{userCandidate.VersionText} in the user folder — " +
+                    $"the built-in v{bundledCandidate.VersionText} is newer.");
+                resolved.Add(new ResolvedPlugin(bundledCandidate, null));
+            }
+        }
+
+        foreach ((string id, PluginCandidate userCandidate) in user)
+        {
+            if (!bundled.ContainsKey(id))
+                resolved.Add(new ResolvedPlugin(userCandidate, null));
+        }
+
+        foreach (PluginCandidate candidate in unidentified)
+            resolved.Add(new ResolvedPlugin(candidate, null));
+
+        return resolved;
+    }
+
+    /// <summary>
+    /// Finds the directory + manifest path for a plugin id, applying the same
+    /// override rule as <see cref="ResolvePlugins"/>. Returns false when no manifest
+    /// with that id exists.
+    /// </summary>
+    private static bool TryResolvePluginDir(string pluginId, out string dir, out string manifestPath)
+    {
+        dir = null;
+        manifestPath = null;
+        if (string.IsNullOrWhiteSpace(pluginId))
+            return false;
+
+        ResolvedPlugin resolved = ResolvePlugins().FirstOrDefault(
+            r => string.Equals(r.Winner.Id, pluginId, StringComparison.OrdinalIgnoreCase));
+        if (resolved == null)
+            return false;
+
+        dir = resolved.Winner.Directory;
+        manifestPath = resolved.Winner.ManifestPath;
+        return true;
+    }
+
+    /// <summary>Records which copy a loaded entry came from, for the Plugins page.</summary>
+    private static LoadedPlugin StampProvenance(LoadedPlugin loaded, ResolvedPlugin resolved)
+    {
+        loaded.IsBundled = resolved.Winner.IsBundled;
+        loaded.BundledFallbackVersion = resolved.ShadowedBundled?.VersionText;
+        return loaded;
+    }
+
+    public void LoadPlugins()
+    {
+        var loadedPlugins = new List<LoadedPlugin>();
+
+        // Plugins are discovered from two roots: the bundled `plugins/` folder next
+        // to the executable, and a user `plugins/` folder alongside the config files
+        // (~/.config/LoupixDeck/plugins). When an id exists in both, ResolvePlugins
+        // picks the higher version (ties go to the user copy), so a user copy can
+        // update a built-in plugin without touching the app directory.
+        // The user plugins folder is created on startup so it always exists for the
+        // user to drop plugins into (and for "Open Plugins Folder" to open).
+        string userPluginsRoot = GetPluginRoots().User;
+        try
+        {
+            Directory.CreateDirectory(userPluginsRoot);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"PluginManager: could not create user plugins dir '{userPluginsRoot}': {ex.Message}");
+        }
+
+        // Carry out any lifecycle ops that were deferred while assemblies were
+        // locked — now, before anything is loaded. Installs (staged update swaps)
+        // first, then removals.
+        PluginInstaller.ProcessPendingInstalls(userPluginsRoot);
+        PluginInstaller.ProcessPendingRemovals(userPluginsRoot);
+
+        foreach (ResolvedPlugin resolved in ResolvePlugins())
+        {
+            loadedPlugins.Add(StampProvenance(
+                LoadOne(resolved.Winner.Directory, resolved.Winner.ManifestPath), resolved));
+        }
+
+        _plugins = loadedPlugins; // single atomic publish
+
+        var ok = loadedPlugins.Count(p => p.Status == PluginLoadStatus.Loaded);
+        Console.WriteLine($"PluginManager: {ok}/{loadedPlugins.Count} plugin(s) loaded.");
+
+        // Never on the startup path: the probes may spawn processes.
+        _ = RefreshRequirementsAsync();
+    }
+
+    public async Task RefreshRequirementsAsync()
+    {
+        await _requirementsGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            bool changed = await Task.Run(() =>
+            {
+                bool any = false;
+                foreach (LoadedPlugin plugin in _plugins)
+                    any |= EvaluateRequirements(plugin);
+                return any;
+            }).ConfigureAwait(false);
+
+            if (changed)
+                RaiseRequirementsChanged();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"PluginManager: refreshing plugin requirements failed: {ex.Message}");
+        }
+        finally
+        {
+            _requirementsGate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Evaluates one plugin's requirements and stores them. Returns true when the stored list
+    /// differs from the previous one. A plugin that throws is treated as reporting nothing.
+    /// </summary>
+    private static bool EvaluateRequirements(LoadedPlugin plugin)
+    {
+        IReadOnlyList<PluginRequirement> next = Array.Empty<PluginRequirement>();
+
+        if (plugin.Status == PluginLoadStatus.Loaded && plugin.Instance is IPluginRequirements provider)
+        {
+            try
+            {
+                next = provider.GetRequirements()?.Where(r => r != null).ToList() ?? next;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(
+                    $"PluginManager: '{plugin.Manifest?.Id}' GetRequirements threw: {ex.Message}");
+            }
+        }
+
+        if (RequirementsSignature(plugin.Requirements) == RequirementsSignature(next))
+            return false;
+
+        plugin.Requirements = next;
+        return true;
+    }
+
+    private static string RequirementsSignature(IReadOnlyList<PluginRequirement> requirements) =>
+        string.Join("\n", requirements.Select(r => $"{r.Id}|{r.IsMet}|{r.Message}|{r.InstallHint}"));
+
+    private void RaiseRequirementsChanged()
+    {
+        try
+        {
+            RequirementsChanged?.Invoke();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"PluginManager: a RequirementsChanged subscriber threw: {ex.Message}");
+        }
+    }
+
+    public LoadedPlugin LoadPlugin(string pluginId)
+    {
+        if (!TryResolvePluginDir(pluginId, out var dir, out var manifestPath))
+        {
+            Console.WriteLine($"PluginManager: cannot load '{pluginId}' — no manifest found.");
+            return null;
+        }
+
+        // Replace any prior entry for this id, then load fresh. LoadOne applies the
+        // enable/platform/SDK gates, so a disabled plugin produces a Disabled entry
+        // with no load context (nothing to unload, no file lock).
+        UnloadPlugin(pluginId);
+
+        var loaded = LoadOne(dir, manifestPath);
+        ResolvedPlugin resolved = ResolvePlugins().FirstOrDefault(
+            r => string.Equals(r.Winner.Id, pluginId, StringComparison.OrdinalIgnoreCase));
+        if (resolved != null)
+            StampProvenance(loaded, resolved);
+
+        ReplacePlugins(list =>
+        {
+            list.RemoveAll(p => string.Equals(p.Manifest?.Id, pluginId, StringComparison.OrdinalIgnoreCase));
+            list.Add(loaded);
+        });
+
+        _ = RefreshRequirementsAsync();
+
+        return loaded;
+    }
+
+    public bool UnloadPlugin(string pluginId)
+    {
+        var plugin = _plugins.FirstOrDefault(
+            p => string.Equals(p.Manifest?.Id, pluginId, StringComparison.OrdinalIgnoreCase));
+        if (plugin == null)
+            return false;
+
+        if (plugin.Status == PluginLoadStatus.Loaded)
+        {
+            try { plugin.Instance?.Shutdown(); }
+            catch (Exception ex) { Console.WriteLine($"PluginManager: '{pluginId}' Shutdown threw: {ex.Message}"); }
+        }
+
+        // Safety net after Shutdown had its chance: never leave a renderer of an unloaded plugin
+        // registered with the animation scheduler (issue #124).
+        ReleaseFullDisplaySessions(pluginId);
+        LocalizationManager.Instance.UnregisterPluginStrings(pluginId);
+
+        ReplacePlugins(list =>
+            list.RemoveAll(p => string.Equals(p.Manifest?.Id, pluginId, StringComparison.OrdinalIgnoreCase)));
+
+        // Drop every strong reference we own so the only roots left are external
+        // (in-flight Execute, etc.), then request the collectible unload.
+        var context = plugin.LoadContext;
+        plugin.Instance = null;
+        plugin.Host = null;
+        bool hadRequirements = plugin.Requirements.Count > 0;
+        plugin.Requirements = Array.Empty<PluginRequirement>();
+        plugin.Commands = Array.Empty<IPluginCommand>();
+        plugin.SideStripProviders = Array.Empty<ISideStripProvider>();
+        plugin.ScreensaverProviders = Array.Empty<IScreensaverProvider>();
+        plugin.LoadContext = null;
+
+        try { context?.Unload(); }
+        catch (Exception ex) { Console.WriteLine($"PluginManager: '{pluginId}' Unload threw: {ex.Message}"); }
+
+        if (hadRequirements)
+            RaiseRequirementsChanged();
+
+        return context != null;
+    }
+
+    private LoadedPlugin LoadOne(string dir, string manifestPath)
+    {
+        PluginManifest manifest = null;
+        try
+        {
+            manifest = JsonConvert.DeserializeObject<PluginManifest>(File.ReadAllText(manifestPath));
+        }
+        catch (Exception ex)
+        {
+            return Fail(dir, null, $"Invalid plugin.json: {ex.Message}");
+        }
+
+        if (manifest == null || string.IsNullOrWhiteSpace(manifest.Id)
+            || string.IsNullOrWhiteSpace(manifest.EntryAssembly))
+        {
+            return Fail(dir, manifest, "plugin.json is missing 'id' or 'entryAssembly'.");
+        }
+
+        // Translations the plugin ships next to its manifest. Registered before the gates, so a
+        // disabled plugin's name and description still show in the user's language.
+        LocalizationManager.Instance.RegisterPluginStrings(manifest.Id, dir);
+
+        // User gate — a plugin only loads when the user has enabled it.
+        // No FailureReason: the status alone says it, and DescribeStatus renders it in the
+        // user's language. A reason here would override that with developer English, and the
+        // only place it is shown is the plugin window, where the toggle that flips this state
+        // is already on screen.
+        if (!IsEnabled(manifest.Id))
+        {
+            return new LoadedPlugin
+            {
+                Manifest = manifest,
+                Directory = dir,
+                Status = PluginLoadStatus.Disabled
+            };
+        }
+
+        // Platform gate — skip plugins not meant for this OS.
+        if (!PlatformMatches(manifest.Platform))
+        {
+            return new LoadedPlugin
+            {
+                Manifest = manifest,
+                Directory = dir,
+                Status = PluginLoadStatus.Disabled,
+                FailureReason = $"Plugin targets '{manifest.Platform}', not this OS."
+            };
+        }
+
+        // SDK compatibility — the major version must match the host SDK.
+        if (!Version.TryParse(manifest.SdkVersion, out var pluginSdk))
+        {
+            return Incompatible(dir, manifest, $"Unparseable sdkVersion '{manifest.SdkVersion}'.");
+        }
+
+        if (pluginSdk.Major != SdkInfo.Version.Major)
+        {
+            return Incompatible(dir, manifest,
+                $"Plugin SDK {pluginSdk} is incompatible with host SDK {SdkInfo.Version}.");
+        }
+
+        var entryPath = Path.Combine(dir, manifest.EntryAssembly);
+        if (!File.Exists(entryPath))
+        {
+            return Fail(dir, manifest, $"Entry assembly '{manifest.EntryAssembly}' not found.");
+        }
+
+        PluginLoadContext context = null;
+        try
+        {
+            context = new PluginLoadContext(entryPath);
+            var assembly = context.LoadFromAssemblyPath(entryPath);
+
+            var pluginType = assembly.GetTypes()
+                .FirstOrDefault(t => !t.IsAbstract && typeof(LoupixPlugin).IsAssignableFrom(t));
+
+            if (pluginType == null)
+            {
+                context.Unload();
+                return Fail(dir, manifest, "No LoupixPlugin implementation found in entry assembly.");
+            }
+
+            var instance = (LoupixPlugin)Activator.CreateInstance(pluginType);
+
+            var host = CreateHost(manifest, dir);
+            instance.Initialize(host);
+
+            var commands = instance.GetCommands()?.Where(c => c != null).ToList()
+                           ?? new List<IPluginCommand>();
+
+            var stripProviders = instance.GetSideStripProviders()?.Where(p => p != null).ToList()
+                                 ?? new List<ISideStripProvider>();
+
+            var screensaverProviders = instance.GetScreensaverProviders()?.Where(p => p != null).ToList()
+                                       ?? new List<IScreensaverProvider>();
+
+            // Remember which commands this plugin provides, so buttons that use them are still
+            // recognised as plugin commands after the plugin is removed.
+            RecordCommands(manifest.Id, commands);
+
+            return new LoadedPlugin
+            {
+                Manifest = manifest,
+                Directory = dir,
+                Status = PluginLoadStatus.Loaded,
+                Instance = instance,
+                LoadContext = context,
+                Host = host,
+                Commands = commands,
+                SideStripProviders = stripProviders,
+                ScreensaverProviders = screensaverProviders
+            };
+        }
+        catch (Exception ex)
+        {
+            try { context?.Unload(); } catch { /* best effort */ }
+            return Fail(dir, manifest, $"Load/initialize threw: {ex.Message}");
+        }
+    }
+
+    private PluginHost CreateHost(PluginManifest manifest, string dir)
+    {
+        var logger = new PluginLogger(manifest.Id);
+        var settings = new PluginSettingsStore(Path.Combine(dir, "settings.json"));
+        // Shared host (plugins load once): ActiveDevice reflects the primary device's
+        // identity. Per-call device targeting is handled by the host delegates resolving
+        // through the router's ambient device, not by this static value.
+        var deviceInfo = Device.GetRequiredService<DeviceRegistry.DeviceInfo>();
+        var device = new SdkDeviceInfo(
+            deviceInfo.Name, deviceInfo.VendorId, deviceInfo.ProductId, deviceInfo.Slug);
+
+        // Resolved lazily at call time so host operations work regardless of
+        // service construction order.
+        void ExecuteCommand(string command)
+        {
+            try
+            {
+                // Chained from a plugin — there's no triggering button.
+                _ = Device.GetRequiredService<ICommandService>().ExecuteCommand(command, ButtonTargets.None);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"PluginHost[{manifest.Id}]: ExecuteCommand failed: {ex.Message}");
+            }
+        }
+
+        void RequestButtonRefresh(string commandName)
+        {
+            foreach (IServiceProvider target in ButtonTargetDevices())
+            {
+                try
+                {
+                    target.GetRequiredService<IDynamicTextManager>().RefreshCommand(commandName);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"PluginHost[{manifest.Id}]: RequestButtonRefresh failed: {ex.Message}");
+                }
+
+                // A dial indicator is drawn from the command's adjustment value, so the same
+                // request has to reach the side strips. Guarded separately: a strip that fails
+                // to repaint must not cost the touch buttons their refresh.
+                try
+                {
+                    _ = target.GetRequiredService<Controllers.IDeviceController>()
+                        .RefreshDialsForCommand(commandName);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"PluginHost[{manifest.Id}]: RefreshDialsForCommand failed: {ex.Message}");
+                }
+            }
+        }
+
+        void OpenFolder(IFolderProvider provider)
+        {
+            try
+            {
+                var nav = Device.GetRequiredService<FolderNavigation.IFolderNavigationService>();
+                _ = nav.OpenFolder(new PluginFolderAdapter(provider));
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"PluginHost[{manifest.Id}]: OpenFolder failed: {ex.Message}");
+            }
+        }
+
+        FolderGridInfo GetFolderGrid()
+        {
+            try
+            {
+                var nav = Device.GetRequiredService<FolderNavigation.IFolderNavigationService>();
+                return new FolderGridInfo(nav.Grid.Columns, nav.Grid.Rows, nav.Grid.BackSlotIndex);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"PluginHost[{manifest.Id}]: GetFolderGrid failed: {ex.Message}");
+                var fallback = FolderNavigation.FolderGrid.Default;
+                return new FolderGridInfo(fallback.Columns, fallback.Rows, fallback.BackSlotIndex);
+            }
+        }
+
+        void OverlayTouchText(int slot, string text, TimeSpan duration)
+        {
+            try
+            {
+                var devSvc = Device.GetRequiredService<IDeviceService>();
+                // Fire and forget — the host's ShowTemporaryTextButton already
+                // self-supersedes via its internal call-ID counter, so quick
+                // repeated invocations don't queue up restore-races.
+                _ = devSvc.ShowTemporaryTextButton(slot, text ?? string.Empty,
+                    (int)Math.Max(50, duration.TotalMilliseconds));
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"PluginHost[{manifest.Id}]: OverlayTouchText failed: {ex.Message}");
+            }
+        }
+
+        int GetTouchSlotForRotary(int rotaryIndex)
+        {
+            try
+            {
+                return Device.GetRequiredService<IDeviceService>().Device?
+                    .GetTouchSlotForRotary(rotaryIndex) ?? -1;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"PluginHost[{manifest.Id}]: GetTouchSlotForRotary failed: {ex.Message}");
+                return -1;
+            }
+        }
+
+        // A takeover must hit the device that ENABLED this plugin — not just whatever
+        // the router resolves at call time. When the request comes from a button press
+        // the ambient is already that device, but a plugin's own worker thread (e.g. a
+        // telemetry listener that auto-engages) runs with no ambient and would otherwise
+        // fall back to the primary device. We pin the entered device here so Release /
+        // IsActive stay consistent with Enter even if the ambient changes meanwhile.
+        IServiceProvider exclusiveTarget = null;
+
+        bool RequestExclusiveMode(IExclusiveModeProvider provider)
+        {
+            try
+            {
+                var target = ResolveEnablingDevice(manifest.Id);
+                // Mutual exclusion with the raw full-display renderer path (issue #124): both take
+                // the whole display, so whoever owns it first wins. The reverse guard (full-display
+                // rejected while exclusive mode is active) lives in FullDisplayRenderService.
+                if (target.GetRequiredService<IFullDisplayRenderService>().IsActive)
+                    return false;
+
+                if (target.GetRequiredService<IExclusiveModeService>().TryEnter(provider))
+                {
+                    exclusiveTarget = target;
+                    return true;
+                }
+
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"PluginHost[{manifest.Id}]: RequestExclusiveMode failed: {ex.Message}");
+                return false;
+            }
+        }
+
+        void ReleaseExclusiveMode(IExclusiveModeProvider provider)
+        {
+            try
+            {
+                (exclusiveTarget ?? Device).GetRequiredService<IExclusiveModeService>().Exit(provider);
+                exclusiveTarget = null;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"PluginHost[{manifest.Id}]: ReleaseExclusiveMode failed: {ex.Message}");
+            }
+        }
+
+        bool IsInExclusiveMode()
+        {
+            try { return (exclusiveTarget ?? Device).GetRequiredService<IExclusiveModeService>().IsActive; }
+            catch { return false; }
+        }
+
+        IFullDisplayRenderSession RequestFullDisplayRenderer(IFullDisplayRenderer renderer)
+        {
+            try
+            {
+                // Hit the device that ENABLED this plugin (same reasoning as RequestExclusiveMode:
+                // a plugin's own worker thread has no ambient device). The session handle routes
+                // its own Release back to the owning service, so no pinned target is needed — but
+                // we do track it per plugin id so unload/shutdown can force-release it.
+                var target = ResolveEnablingDevice(manifest.Id);
+                var session = target.GetRequiredService<IFullDisplayRenderService>().TryEnter(renderer);
+                if (session != null)
+                    TrackFullDisplaySession(manifest.Id, session);
+                return session;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"PluginHost[{manifest.Id}]: RequestFullDisplayRenderer failed: {ex.Message}");
+                return null;
+            }
+        }
+
+        // A button-facing call arrives from the plugin's own thread (an OBS websocket event, a
+        // poll timer) with no ambient device, which would resolve to the primary alone — so the
+        // button on a secondary device would never be found. Address every device that enables
+        // this plugin instead, ambient first so a call made during a device's own flow keeps
+        // acting on that device.
+        IEnumerable<IServiceProvider> ButtonTargetDevices()
+        {
+            List<IServiceProvider> targets = [];
+
+            IServiceProvider ambient = _router.Current;
+            if (DeviceEnables(ambient, manifest.Id))
+                targets.Add(ambient);
+
+            foreach (DeviceHost host in _hostRegistry.Hosts)
+            {
+                if (host?.Provider == null || ReferenceEquals(host.Provider, ambient)) continue;
+                if (DeviceEnables(host.Provider, manifest.Id))
+                    targets.Add(host.Provider);
+            }
+
+            // Nothing claims the plugin (shouldn't happen while it is loaded): fall back to the
+            // ambient/primary so the call still resolves somewhere.
+            if (targets.Count == 0 && ambient != null)
+                targets.Add(ambient);
+
+            return targets;
+        }
+
+        IReadOnlyList<string> GetButtonStates(string commandName)
+        {
+            foreach (IServiceProvider target in ButtonTargetDevices())
+            {
+                try
+                {
+                    IReadOnlyList<string> states =
+                        target.GetRequiredService<IButtonStateService>().GetStates(commandName);
+                    if (states.Count > 0)
+                        return states;
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"PluginHost[{manifest.Id}]: GetButtonStates failed: {ex.Message}");
+                }
+            }
+
+            return [];
+        }
+
+        string GetActiveButtonState(string commandName)
+        {
+            foreach (IServiceProvider target in ButtonTargetDevices())
+            {
+                try
+                {
+                    string state = target.GetRequiredService<IButtonStateService>().GetActiveState(commandName);
+                    if (state != null)
+                        return state;
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"PluginHost[{manifest.Id}]: GetActiveButtonState failed: {ex.Message}");
+                }
+            }
+
+            return null;
+        }
+
+        bool SetActiveButtonState(string commandName, string stateNameOrId)
+        {
+            bool changed = false;
+
+            foreach (IServiceProvider target in ButtonTargetDevices())
+            {
+                try
+                {
+                    changed |= target.GetRequiredService<IButtonStateService>()
+                        .SetActiveState(commandName, stateNameOrId);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"PluginHost[{manifest.Id}]: SetActiveButtonState failed: {ex.Message}");
+                }
+            }
+
+            return changed;
+        }
+
+        return new PluginHost(manifest.Id, logger, settings, device, ExecuteCommand, RequestButtonRefresh,
+            OpenFolder, OverlayTouchText, GetTouchSlotForRotary,
+            RequestExclusiveMode, ReleaseExclusiveMode, IsInExclusiveMode,
+            RequestFullDisplayRenderer,
+            GetButtonStates, GetActiveButtonState, SetActiveButtonState,
+            GetFolderGrid);
+    }
+
+    /// <summary>Remembers a full-display session handed to a plugin, pruning released ones.</summary>
+    private void TrackFullDisplaySession(string pluginId, IFullDisplayRenderSession session)
+    {
+        if (string.IsNullOrWhiteSpace(pluginId) || session == null)
+            return;
+
+        List<IFullDisplayRenderSession> sessions = _fullDisplaySessions.GetOrAdd(pluginId, _ => []);
+        lock (sessions)
+        {
+            sessions.RemoveAll(s => s == null || !s.IsActive);
+            sessions.Add(session);
+        }
+    }
+
+    /// <summary>
+    /// Force-releases every full-display session (issue #124) still held by a plugin. Called after
+    /// the plugin's own <see cref="LoupixPlugin.Shutdown"/> so a well-behaved plugin releases first
+    /// and this is a no-op; it only matters when the plugin didn't, since a renderer left registered
+    /// with the scheduler would be ticked inside an unloaded load context.
+    /// </summary>
+    private void ReleaseFullDisplaySessions(string pluginId)
+    {
+        if (string.IsNullOrWhiteSpace(pluginId) || !_fullDisplaySessions.TryRemove(pluginId, out var sessions))
+            return;
+
+        lock (sessions)
+        {
+            foreach (IFullDisplayRenderSession session in sessions)
+            {
+                try { session?.Release(); }
+                catch (Exception ex)
+                {
+                    Console.WriteLine(
+                        $"PluginManager: '{pluginId}' full-display session release threw: {ex.Message}");
+                }
+            }
+
+            sessions.Clear();
+        }
+    }
+
+    public void ShutdownAll()
+    {
+        foreach (var plugin in _plugins)
+            LocalizationManager.Instance.UnregisterPluginStrings(plugin.Manifest?.Id);
+
+        foreach (var plugin in _plugins.Where(p => p.Status == PluginLoadStatus.Loaded))
+        {
+            try
+            {
+                plugin.Instance?.Shutdown();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"PluginManager: '{plugin.Manifest?.Id}' Shutdown threw: {ex.Message}");
+            }
+
+            // Same safety net as UnloadPlugin — see ReleaseFullDisplaySessions.
+            ReleaseFullDisplaySessions(plugin.Manifest?.Id);
+
+            try
+            {
+                plugin.LoadContext?.Unload();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"PluginManager: '{plugin.Manifest?.Id}' Unload threw: {ex.Message}");
+            }
+        }
+    }
+
+    public bool IsEnabledOnAnyDevice(string pluginId) => IsEnabled(pluginId);
+
+    private bool IsEnabled(string pluginId)
+    {
+        // Plugins load once and are shared across devices, but the enabled set is
+        // persisted per device (LoupedeckConfig.EnabledPlugins). A plugin must load
+        // when ANY running device enables it — otherwise enabling it from a non-primary
+        // device's Settings page writes the flag to that device's config while this gate
+        // (formerly primary-only) never sees it, leaving the plugin stuck "Disabled".
+        // Union semantics also make disable correct: a plugin only stops loading once no
+        // device still enables it.
+        foreach (var host in _hostRegistry.Hosts)
+        {
+            if (DeviceEnables(host.Provider, pluginId))
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// The device a shared plugin should act on for ownership operations (exclusive
+    /// mode): the device that enabled it. Prefers the ambient device when it is itself
+    /// an enabler (a takeover triggered by a button press on that device), otherwise the
+    /// single device whose config enables the plugin. Falls back to the ambient/primary
+    /// when nothing enables it (shouldn't happen for a loaded plugin) so the call still
+    /// resolves a provider rather than throwing.
+    /// </summary>
+    private IServiceProvider ResolveEnablingDevice(string pluginId)
+    {
+        var current = _router.Current;
+        if (DeviceEnables(current, pluginId))
+            return current;
+
+        foreach (var host in _hostRegistry.Hosts)
+        {
+            if (DeviceEnables(host.Provider, pluginId))
+                return host.Provider;
+        }
+
+        return current;
+    }
+
+    private static bool DeviceEnables(IServiceProvider provider, string pluginId)
+    {
+        var enabled = provider?.GetService<Models.LoupedeckConfig>()?.EnabledPlugins;
+        return enabled != null
+               && enabled.Any(id => string.Equals(id, pluginId, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// True when the manifest's <c>platform</c> field allows this OS. Public so the
+    /// settings UI can hide plugins that can never run on the current platform
+    /// instead of listing them as a dead "Disabled" row.
+    /// </summary>
+    public static bool SupportsCurrentPlatform(PluginManifest manifest) =>
+        PlatformMatches(manifest?.Platform);
+
+    private static bool PlatformMatches(string platform)
+    {
+        if (string.IsNullOrWhiteSpace(platform) ||
+            platform.Equals("All", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (platform.Equals("Windows", StringComparison.OrdinalIgnoreCase))
+            return OperatingSystem.IsWindows();
+
+        if (platform.Equals("Linux", StringComparison.OrdinalIgnoreCase))
+            return OperatingSystem.IsLinux();
+
+        return false;
+    }
+
+    private static LoadedPlugin Fail(string dir, PluginManifest manifest, string reason)
+    {
+        Console.WriteLine($"PluginManager: '{manifest?.Id ?? dir}' failed — {reason}");
+        return new LoadedPlugin
+        {
+            Manifest = manifest,
+            Directory = dir,
+            Status = PluginLoadStatus.Failed,
+            FailureReason = reason
+        };
+    }
+
+    private static LoadedPlugin Incompatible(string dir, PluginManifest manifest, string reason)
+    {
+        Console.WriteLine($"PluginManager: '{manifest?.Id ?? dir}' incompatible — {reason}");
+        return new LoadedPlugin
+        {
+            Manifest = manifest,
+            Directory = dir,
+            Status = PluginLoadStatus.Incompatible,
+            FailureReason = reason
+        };
+    }
+}

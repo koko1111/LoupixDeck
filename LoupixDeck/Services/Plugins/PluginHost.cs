@@ -1,0 +1,141 @@
+using System.Diagnostics;
+using LoupixDeck.Localization;
+using LoupixDeck.PluginSdk;
+
+namespace LoupixDeck.Services.Plugins;
+
+/// <summary>
+/// Concrete <see cref="IPluginHost"/> handed to a single plugin. The host
+/// operations are wired as delegates by the <see cref="PluginManager"/> so the
+/// host stays decoupled from the core's command and rendering services.
+/// </summary>
+public sealed class PluginHost : IPluginHost
+{
+    private readonly string _pluginId;
+    private readonly Action<string> _executeCommand;
+    private readonly Action<string> _requestButtonRefresh;
+    private readonly Action<IFolderProvider> _openFolder;
+    private readonly Action<int, string, TimeSpan> _overlayTouchText;
+    private readonly Func<int, int> _getTouchSlotForRotary;
+    private readonly Func<IExclusiveModeProvider, bool> _requestExclusiveMode;
+    private readonly Action<IExclusiveModeProvider> _releaseExclusiveMode;
+    private readonly Func<bool> _isInExclusiveMode;
+    private readonly Func<IFullDisplayRenderer, IFullDisplayRenderSession> _requestFullDisplayRenderer;
+    private readonly Func<string, IReadOnlyList<string>> _getButtonStates;
+    private readonly Func<string, string> _getActiveButtonState;
+    private readonly Func<string, string, bool> _setActiveButtonState;
+    private readonly Func<FolderGridInfo> _getFolderGrid;
+
+    public PluginHost(
+        string pluginId,
+        IPluginLogger logger,
+        IPluginSettings settings,
+        DeviceInfo activeDevice,
+        Action<string> executeCommand,
+        Action<string> requestButtonRefresh,
+        Action<IFolderProvider> openFolder,
+        Action<int, string, TimeSpan> overlayTouchText,
+        Func<int, int> getTouchSlotForRotary,
+        Func<IExclusiveModeProvider, bool> requestExclusiveMode,
+        Action<IExclusiveModeProvider> releaseExclusiveMode,
+        Func<bool> isInExclusiveMode,
+        Func<IFullDisplayRenderer, IFullDisplayRenderSession> requestFullDisplayRenderer,
+        Func<string, IReadOnlyList<string>> getButtonStates,
+        Func<string, string> getActiveButtonState,
+        Func<string, string, bool> setActiveButtonState,
+        Func<FolderGridInfo> getFolderGrid)
+    {
+        _pluginId = pluginId;
+        Logger = logger;
+        Settings = settings;
+        ActiveDevice = activeDevice;
+        _executeCommand = executeCommand;
+        _requestButtonRefresh = requestButtonRefresh;
+        _openFolder = openFolder;
+        _overlayTouchText = overlayTouchText;
+        _getTouchSlotForRotary = getTouchSlotForRotary;
+        _requestExclusiveMode = requestExclusiveMode;
+        _releaseExclusiveMode = releaseExclusiveMode;
+        _isInExclusiveMode = isInExclusiveMode;
+        _requestFullDisplayRenderer = requestFullDisplayRenderer;
+        _getButtonStates = getButtonStates;
+        _getActiveButtonState = getActiveButtonState;
+        _setActiveButtonState = setActiveButtonState;
+        _getFolderGrid = getFolderGrid;
+    }
+
+    public IPluginLogger Logger { get; }
+
+    public IPluginSettings Settings { get; }
+
+    public DeviceInfo ActiveDevice { get; }
+
+    public string CurrentLanguage => LocalizationManager.Instance.CurrentLanguage;
+
+    /// <summary>
+    /// Resolved against the owning plugin's own <c>strings.&lt;code&gt;.json</c>, so two plugins can
+    /// translate the same English wording differently. Reads only, and the plugin map is locked,
+    /// so a plugin may call this from any thread.
+    /// </summary>
+    public string Tr(string english) => LocalizationManager.Instance.TrText(english, _pluginId);
+
+    /// <summary>
+    /// Falls back to the SDK's 5x3 default when no device/navigation service can be resolved
+    /// (e.g. during plugin initialization before a device is attached).
+    /// </summary>
+    public FolderGridInfo FolderGrid =>
+        _getFolderGrid?.Invoke() ?? new FolderGridInfo(FolderLayout.Columns, 3, FolderLayout.BackSlotIndex);
+
+    public void RequestButtonRefresh(string commandName) => _requestButtonRefresh?.Invoke(commandName);
+
+    public void ExecuteCommand(string command) => _executeCommand?.Invoke(command);
+
+    public void OpenFolder(IFolderProvider provider) => _openFolder?.Invoke(provider);
+
+    public void OverlayTouchText(int slot, string text, TimeSpan duration) =>
+        _overlayTouchText?.Invoke(slot, text, duration);
+
+    public int GetTouchSlotForRotary(int rotaryIndex) =>
+        _getTouchSlotForRotary?.Invoke(rotaryIndex) ?? -1;
+
+    public bool RequestExclusiveMode(IExclusiveModeProvider provider) =>
+        _requestExclusiveMode?.Invoke(provider) ?? false;
+
+    public void ReleaseExclusiveMode(IExclusiveModeProvider provider) =>
+        _releaseExclusiveMode?.Invoke(provider);
+
+    public bool IsInExclusiveMode => _isInExclusiveMode?.Invoke() ?? false;
+
+    public IFullDisplayRenderSession RequestFullDisplayRenderer(IFullDisplayRenderer renderer) =>
+        _requestFullDisplayRenderer?.Invoke(renderer);
+
+    public IReadOnlyList<string> GetButtonStates(string commandName) =>
+        _getButtonStates?.Invoke(commandName) ?? [];
+
+    public string GetActiveButtonState(string commandName) =>
+        _getActiveButtonState?.Invoke(commandName);
+
+    public bool SetActiveButtonState(string commandName, string stateNameOrId) =>
+        _setActiveButtonState?.Invoke(commandName, stateNameOrId) ?? false;
+
+    public bool OpenBrowser(string url)
+    {
+        if (string.IsNullOrWhiteSpace(url))
+            return false;
+
+        try
+        {
+            // UseShellExecute=true routes through the OS handler: default
+            // browser on Windows, xdg-open (via shell) on Linux. Works
+            // headlessly when there's no UI, in which case Start returns
+            // null but the dispatch is still considered attempted.
+            Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Logger?.Error($"OpenBrowser failed for '{url}'", ex);
+            return false;
+        }
+    }
+}

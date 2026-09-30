@@ -1,0 +1,209 @@
+using System.Diagnostics;
+using LoupixDeck.Utils;
+
+#if WINDOWS
+using System.Diagnostics.CodeAnalysis;
+using System.Management;
+#endif
+
+public static class SerialDeviceHelper
+{
+    // NormalizedSerial is the platform-uniform identity value (Windows hex→ASCII
+    // decoded, '&'-synthesized location ids → null); Serial keeps the raw value
+    // for debugging. See LoupixDeck.Utils.SerialNormalizer.
+    public record SerialDeviceInfo(
+        string DevNode,
+        string Vid,
+        string Pid,
+        string Serial,
+        string NormalizedSerial,
+        string Manufacturer,
+        string Product,
+        string[] Aliases
+    );
+
+#if WINDOWS
+
+    // SuppressMessage rather than [SupportedOSPlatform] — the latter cascades to
+    // every caller and forces platform attributes on otherwise cross-platform
+    // code (the Linux #else branch implements the same API). The WMI call is
+    // only reachable when the WINDOWS constant is defined, so the analyzer
+    // warning is informational, not load-bearing.
+    [SuppressMessage("Interoperability", "CA1416:Validate platform compatibility")]
+    public static List<SerialDeviceInfo> ListSerialUsbDevices()
+    {
+        var result = new List<SerialDeviceInfo>();
+
+        using var searcher = new ManagementObjectSearcher("SELECT * FROM Win32_PnPEntity WHERE Name LIKE '%(COM%'");
+
+        foreach (var device in searcher.Get().OfType<ManagementObject>())
+        {
+            var name = device["Name"]?.ToString(); // z.B. "USB Serial Device (COM3)"
+            var deviceId = device["PNPDeviceID"]?.ToString(); // z.B. "USB\\VID_2341&PID_0043\\..."
+
+            if (string.IsNullOrEmpty(deviceId) || string.IsNullOrEmpty(name)) continue;
+
+            var vid = TryExtractTaggedHex4(deviceId, "VID_");
+            var pid = TryExtractTaggedHex4(deviceId, "PID_");
+            var comPort = TryExtractComPort(name);
+
+            var parts = deviceId.Split('\\');
+            var serial = parts.Length > 2 ? parts[2] : null;
+
+            // A composite USB device exposes its COM port as a child interface
+            // ("USB\VID_2EC2&PID_0006&MI_00\7&26036A56&0&0000"), whose instance id is a
+            // port-dependent value Windows generates. The iSerial sits on the parent
+            // composite device ("USB\VID_2EC2&PID_0006\LDD2201…"), so read it from there.
+            if (serial != null && serial.Contains('&') && TryGetParentInstanceSerial(device) is { } parentSerial)
+                serial = parentSerial;
+
+            var manufacturer = device["Manufacturer"]?.ToString();
+            var product = name;
+
+            if (!string.IsNullOrEmpty(comPort))
+            {
+                result.Add(new SerialDeviceInfo(
+                    DevNode: comPort,
+                    Vid: vid,
+                    Pid: pid,
+                    Serial: serial,
+                    NormalizedSerial: SerialNormalizer.NormalizeWindowsPnpSegment(serial),
+                    Manufacturer: manufacturer,
+                    Product: product,
+                    Aliases: null
+                ));
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// The instance segment of the device's parent (DEVPKEY_Device_Parent), when that parent is the
+    /// USB device itself ("USB\VID_…&amp;PID_…\&lt;serial&gt;"). Null when the property is unavailable or the
+    /// parent is not a plain USB device node.
+    /// </summary>
+    [SuppressMessage("Interoperability", "CA1416:Validate platform compatibility")]
+    private static string TryGetParentInstanceSerial(ManagementObject device)
+    {
+        try
+        {
+            using ManagementBaseObject input = device.GetMethodParameters("GetDeviceProperties");
+            input["devicePropertyKeys"] = new[] { "DEVPKEY_Device_Parent" };
+            using ManagementBaseObject output = device.InvokeMethod("GetDeviceProperties", input, null);
+
+            if (output?["deviceProperties"] is not ManagementBaseObject[] { Length: > 0 } properties)
+                return null;
+
+            string parent = properties[0]["Data"] as string;
+            foreach (ManagementBaseObject property in properties)
+                property.Dispose();
+
+            string[] parts = parent?.Split('\\');
+            if (parts is not { Length: 3 } ||
+                !string.Equals(parts[0], "USB", StringComparison.OrdinalIgnoreCase) ||
+                parts[1].Contains("&MI_", StringComparison.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+
+            return parts[2];
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[SerialDeviceHelper] Parent lookup failed: {ex.Message}");
+            return null;
+        }
+    }
+
+    // VID_xxxx / PID_xxxx (4 hex digits, case-insensitive tag).
+    private static string TryExtractTaggedHex4(ReadOnlySpan<char> haystack, ReadOnlySpan<char> tag)
+    {
+        int index = haystack.IndexOf(tag, StringComparison.OrdinalIgnoreCase);
+        if (index < 0)
+            return null;
+
+        int start = index + tag.Length;
+        if (start + 4 > haystack.Length)
+            return null;
+
+        ReadOnlySpan<char> hex = haystack.Slice(start, 4);
+        for (int i = 0; i < hex.Length; i++)
+        {
+            if (!char.IsAsciiHexDigit(hex[i]))
+                return null;
+        }
+
+        return hex.ToString();
+    }
+
+    // "(COMn)" / "(comn)" → "COMn".
+    private static string TryExtractComPort(ReadOnlySpan<char> name)
+    {
+        int index = name.IndexOf("(COM", StringComparison.OrdinalIgnoreCase);
+        if (index < 0)
+            return null;
+
+        int digits = index + 4;
+        int end = digits;
+        while (end < name.Length && char.IsAsciiDigit(name[end]))
+            end++;
+
+        if (end == digits || end >= name.Length || name[end] != ')')
+            return null;
+
+        return string.Concat("COM", name.Slice(digits, end - digits));
+    }
+#else
+    public static List<SerialDeviceInfo> ListSerialUsbDevices()
+    {
+        var result = new List<SerialDeviceInfo>();
+        var candidates = Directory.EnumerateFiles("/dev")
+            .Where(f => f.StartsWith("/dev/ttyACM") || f.StartsWith("/dev/ttyUSB"));
+
+        foreach (var dev in candidates)
+        {
+            var info = RunUdevadm(dev);
+            if (string.IsNullOrWhiteSpace(info)) continue;
+
+            string Get(string key) =>
+                info.Split('\n').FirstOrDefault(line => line.StartsWith(key + "="))?.Split('=', 2)[1];
+
+            var aliases = Get("DEVLINKS")?.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+
+            var serialShort = Get("ID_SERIAL_SHORT");
+
+            result.Add(new SerialDeviceInfo(
+                DevNode: dev,
+                Vid: Get("ID_VENDOR_ID"),
+                Pid: Get("ID_MODEL_ID"),
+                Serial: serialShort,
+                // Linux udev already yields decoded ASCII — use it as-is, but route
+                // empty/whitespace to null so it matches the Windows null fallback.
+                NormalizedSerial: string.IsNullOrWhiteSpace(serialShort) ? null : serialShort,
+                Manufacturer: Get("ID_VENDOR"),
+                Product: Get("ID_MODEL"),
+                Aliases: aliases
+            ));
+        }
+
+        return result;
+    }
+
+#endif
+
+    private static string RunUdevadm(string devPath)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = "udevadm",
+            Arguments = $"info -q property -n {devPath}",
+            RedirectStandardOutput = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        using var proc = Process.Start(psi);
+        return proc?.StandardOutput.ReadToEnd() ?? "";
+    }
+}

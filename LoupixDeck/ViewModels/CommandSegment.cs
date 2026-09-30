@@ -1,0 +1,300 @@
+﻿using LoupixDeck.Localization;
+using System.Collections.ObjectModel;
+using System.ComponentModel;
+using System.Windows.Input;
+using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
+using LoupixDeck.Commands;
+using LoupixDeck.Commands.Base;
+using LoupixDeck.Models;
+using LoupixDeck.Services;
+using LoupixDeck.Utils;
+
+namespace LoupixDeck.ViewModels;
+
+/// <summary>
+/// A single editable parameter of a known command. Rendered as a checkbox (bool),
+/// a combo box (enum) or a text box (everything else). The value is kept as a
+/// string and fed back into <see cref="ICommandBuilder.BuildCommandString"/>,
+/// which only ever calls <c>ToString()</c> on it.
+/// </summary>
+[ObservableObject]
+public partial class CommandParameter
+{
+    public string Name { get; }
+
+    /// <summary>The name as shown in the editor. <see cref="Name"/> stays the key the command
+    /// string is built from, so a translation never reaches the saved command.</summary>
+    public string DisplayName { get; }
+
+    public Type ParameterType { get; }
+
+    public bool IsBool { get; }
+    public bool IsEnum { get; }
+    public bool IsText => !IsBool && !IsEnum;
+
+    /// <summary>Enum value names for the combo box; null for non-enum parameters.</summary>
+    public IReadOnlyList<string> Options { get; }
+
+    private readonly IDialogService _dialogService;
+    private readonly string _picker;
+
+    /// <summary>
+    /// True when this parameter can be filled by a dialog instead of typing — the editor then
+    /// shows a record button next to the text box.
+    /// </summary>
+    public bool HasPicker { get; }
+
+    /// <summary>Tooltip of the record button; null when the parameter has no picker.</summary>
+    public string PickerHint { get; }
+
+    /// <summary>Opens the parameter's picker dialog and stores what it returns.</summary>
+    public ICommand PickCommand => field ??= new AsyncRelayCommand(PickValueAsync);
+
+    public CommandParameter(string name, Type parameterType, string value,
+        string picker = null, IDialogService dialogService = null, string ownerPluginId = null)
+    {
+        Name = name;
+        // Only plugin parameters are looked up; core parameter names were never translated.
+        DisplayName = ownerPluginId == null ? name : LocalizationManager.Instance.TrText(name, ownerPluginId);
+        ParameterType = parameterType ?? typeof(string);
+        IsBool = ParameterType == typeof(bool);
+        IsEnum = ParameterType.IsEnum;
+        if (IsEnum)
+            Options = Enum.GetNames(ParameterType);
+        _value = value ?? string.Empty;
+
+        _dialogService = dialogService;
+        _picker = picker;
+
+        // Without a dialog service there is nothing to open, so the button stays hidden rather
+        // than failing when it is pressed.
+        HasPicker = dialogService != null && picker != null && IsText;
+        PickerHint = HasPicker ? "Record by pressing the keys" : null;
+    }
+
+    private async Task PickValueAsync()
+    {
+        if (!HasPicker)
+            return;
+
+        KeyCaptureRequest request = new()
+        {
+            Mode = _picker switch
+            {
+                ParameterPicker.KeySequence => KeyCaptureMode.Sequence,
+                ParameterPicker.Modifiers => KeyCaptureMode.Modifiers,
+                _ => KeyCaptureMode.Combination
+            }
+        };
+
+        DialogResult result = await _dialogService.ShowDialogAsync<KeyCaptureViewModel, DialogResult>(
+            vm => vm.Initialize(request));
+
+        if (result is not { IsConfirmed: true } || string.IsNullOrEmpty(request.CapturedKeys))
+            return;
+
+        Value = request.CapturedKeys;
+    }
+
+    private string _value;
+    public string Value
+    {
+        get => _value;
+        set
+        {
+            if (_value == value) return;
+            _value = value;
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(BoolValue));
+        }
+    }
+
+    /// <summary>Two-way bridge for the bool checkbox — parses/serialises <see cref="Value"/>.</summary>
+    public bool BoolValue
+    {
+        get => bool.TryParse(_value, out var b) && b;
+        set => Value = value ? "True" : "False";
+    }
+}
+
+/// <summary>
+/// One link in a touch button's command chain, shown as a card in the editor.
+/// Known commands expose structured <see cref="Parameters"/>; unknown/shell
+/// commands fall back to a single free-text field (<see cref="ShellText"/>).
+///
+/// Note on the first ("Target") parameter: it is rendered as a plain text field
+/// (or an enum combo when the type is an enum), not as a populated dropdown of
+/// live device/scene values — those are plugin-specific and not retrievable
+/// generically without a plugin round-trip. Values containing ',' or ')' are not
+/// supported by the executor, so the editor does not support them either.
+/// </summary>
+[ObservableObject]
+public partial class CommandSegment
+{
+    private readonly ICommandBuilder _commandBuilder;
+    private readonly CommandInfo _info;
+
+    /// <summary>Raised whenever the rebuilt command text changes (parameter edit,
+    /// shell-text edit). The owning view model recomposes the chained string.</summary>
+    public event EventHandler Changed;
+
+    public bool IsKnown => _info != null;
+    public string CommandName { get; }
+
+    /// <summary>Fallback label: the command's display name for known commands, and the
+    /// placeholder shown for a shell segment whose text is still empty.</summary>
+    private readonly string _displayName;
+
+    /// <summary>Chip label. A shell segment shows the command text the user is typing,
+    /// so the chip stays in sync with the free-text editor.</summary>
+    public string DisplayName => (IsKnown || string.IsNullOrWhiteSpace(ShellText))
+        ? _displayName
+        : IsUnavailable ? Loc.Tr("Command_UnavailableChip", ShellText) : ShellText;
+
+    public ObservableCollection<CommandParameter> Parameters { get; } = [];
+
+    /// <summary>
+    /// Set when the command belongs to a plugin that is not available: the editor says so instead of
+    /// presenting it as a plain shell command. The command text itself is kept unchanged.
+    /// </summary>
+    public string UnavailableHint { get; private init; }
+
+    public bool IsUnavailable => UnavailableHint != null;
+
+    /// <summary>The current raw text of this single segment (e.g. <c>"OBS.SetScene(Scene 1)"</c>).</summary>
+    public string Raw { get; private set; }
+
+    private CommandSegment(ICommandBuilder commandBuilder, CommandInfo info,
+        string commandName, string displayName, string raw)
+    {
+        _commandBuilder = commandBuilder;
+        _info = info;
+        CommandName = commandName;
+        _displayName = displayName;
+        Raw = raw;
+    }
+
+    /// <summary>
+    /// Builds a segment from a raw command string. <paramref name="info"/> is the
+    /// resolved <see cref="CommandInfo"/> when the command name is a known system
+    /// command, or null for a shell command.
+    /// </summary>
+    /// <param name="missingOwner">The plugin an unresolved command belongs to, when it belongs to one that is not
+    /// available (removed, not installed, not enabled). The segment then stays free text, as before, but says so.</param>
+    /// <param name="lockHint">Why a known command will not run on this device (a profile or workspace switch on a
+    /// companion). The segment stays fully editable but says so.</param>
+    public static CommandSegment Create(ICommandBuilder commandBuilder, IDialogService dialogService,
+        CommandInfo info, string raw, Services.PluginStore.PluginCommandOwner missingOwner = null,
+        string lockHint = null)
+    {
+        raw = (raw ?? string.Empty).Trim();
+        var name = CommandStringParser.GetName(raw);
+
+        // Unknown commands and the dedicated Shell command are both edited as free text and
+        // stored verbatim as their own segment (like the legacy free-text command field),
+        // bypassing the comma-/parenthesis-sensitive parameter editor. A Shell command freshly
+        // picked from the menu arrives wrapped as "System.Shell(Shell Command)" — collapse it
+        // to an empty free-text card so the user can type the actual command.
+        if (info == null || info.CommandName == ShellCommand.CommandName)
+        {
+            var fromMenu = info != null;
+            var shellRaw = fromMenu ? string.Empty : raw;
+            // Only used while the free-text is empty — otherwise the chip shows the typed text.
+            var shellDisplay = LocalizationManager.Instance.TrText(
+                fromMenu ? info.DisplayName : ShellCommand.DisplayName, info?.OwnerPluginId);
+            var shell = new CommandSegment(commandBuilder, null,
+                CommandStringParser.GetName(shellRaw), shellDisplay, shellRaw)
+            {
+                ShellText = shellRaw,
+                UnavailableHint = fromMenu || missingOwner == null
+                    ? null
+                    : Loc.Tr("Command_PluginUnavailable", missingOwner.DisplayName)
+            };
+            return shell;
+        }
+
+        var display = string.IsNullOrWhiteSpace(info.DisplayName)
+            ? name
+            : LocalizationManager.Instance.TrText(info.DisplayName, info.OwnerPluginId);
+        var segment = new CommandSegment(commandBuilder, info, name, display, raw) { UnavailableHint = lockHint };
+
+        // Map the positional values parsed from the raw string onto the declared
+        // parameters; missing trailing values default to empty.
+        var values = CommandStringParser.GetParameters(raw);
+        for (var i = 0; i < info.Parameters.Count; i++)
+        {
+            var descriptor = info.Parameters[i];
+            var value = i < values.Length ? values[i] : string.Empty;
+            var parameter = new CommandParameter(descriptor.Name, descriptor.ParameterType, value,
+                descriptor.Picker, dialogService, info.OwnerPluginId);
+            parameter.PropertyChanged += segment.OnParameterChanged;
+            segment.Parameters.Add(parameter);
+        }
+
+        return segment;
+    }
+
+    private void OnParameterChanged(object sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName != nameof(CommandParameter.Value)) return;
+        RebuildRaw();
+    }
+
+    private void RebuildRaw()
+    {
+        if (!IsKnown) return;
+
+        var values = Parameters.ToDictionary(p => p.Name, object (p) => p.Value);
+        Raw = _commandBuilder.BuildCommandString(_info, values);
+        OnPropertyChanged(nameof(Raw));
+        OnPropertyChanged(nameof(Summary));
+        Changed?.Invoke(this, EventArgs.Empty);
+    }
+
+    // ───────── Shell (unknown command) free-text ─────────
+
+    public string ShellText
+    {
+        get;
+        set
+        {
+            if (!SetProperty(ref field, value)) return;
+            Raw = value ?? string.Empty;
+            OnPropertyChanged(nameof(Raw));
+            OnPropertyChanged(nameof(Summary));
+            OnPropertyChanged(nameof(DisplayName));
+            Changed?.Invoke(this, EventArgs.Empty);
+        }
+    } = string.Empty;
+
+    /// <summary>Compact secondary text for the collapsed card.</summary>
+    public string Summary => IsKnown
+        ? string.Join(", ", Parameters.Select(p => p.Value).Where(v => !string.IsNullOrWhiteSpace(v)))
+        : Raw;
+
+    // ───────── UI state (not persisted) ─────────
+
+    /// <summary>1-based position in the sequence strip; maintained by the owning
+    /// view model whenever the collection changes.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsFirst))]
+    public partial int Position { get; set; }
+
+    /// <summary>True for the first segment — hides the leading "→" connector.</summary>
+    public bool IsFirst => Position <= 1;
+
+    /// <summary>Whether the leading "→" connector glyph is drawn. Maintained by the
+    /// view from layout: false for the very first segment and for any segment that
+    /// starts a new wrapped row, so the arrow never dangles at a row's left edge.
+    /// The arrow's gutter keeps its width regardless, so toggling this never
+    /// re-packs the chips.</summary>
+    [ObservableProperty]
+    public partial bool ShowConnector { get; set; }
+
+    [ObservableProperty]
+    public partial bool IsEditing { get; set; }
+
+    [ObservableProperty]
+    public partial bool IsDragging { get; set; }
+}

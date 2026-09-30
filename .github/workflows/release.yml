@@ -3,126 +3,27 @@ name: .NET Release
 on:
   release:
     types: [published]
+  workflow_dispatch:
 
 permissions:
   contents: write
 
+# Plugins are not bundled: each plugin ships from its own repository through the in-app Plugin
+# Store (issue #234, plugin-store.json). The app release contains the app only.
 jobs:
-  build-plugins:
-    name: Build Plugins
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout Plugin SDK
-        uses: actions/checkout@v5
-        with:
-          repository: RadiatorTwo/LoupixDeck.PluginSdk
-          path: src/LoupixDeck.PluginSdk
-
-      - name: Checkout OBS plugin
-        uses: actions/checkout@v5
-        with:
-          repository: RadiatorTwo/LoupixDeck.Plugin.Obs
-          path: src/LoupixDeck.Plugin.Obs
-
-      - name: Checkout Elgato plugin
-        uses: actions/checkout@v5
-        with:
-          repository: RadiatorTwo/LoupixDeck.Plugin.Elgato
-          path: src/LoupixDeck.Plugin.Elgato
-
-      - name: Checkout HWiNFO plugin
-        uses: actions/checkout@v5
-        with:
-          repository: RadiatorTwo/LoupixDeck.Plugin.HwInfo
-          path: src/LoupixDeck.Plugin.HwInfo
-
-      - name: Checkout CoolerControl plugin
-        uses: actions/checkout@v5
-        with:
-          repository: RadiatorTwo/LoupixDeck.Plugin.CoolerControl
-          path: src/LoupixDeck.Plugin.CoolerControl
-
-      - name: Checkout Audio plugin
-        uses: actions/checkout@v5
-        with:
-          repository: RadiatorTwo/LoupixDeck.Plugin.Audio
-          path: src/LoupixDeck.Plugin.Audio
-
-      - name: Checkout Argus plugin
-        uses: actions/checkout@v5
-        with:
-          repository: RadiatorTwo/LoupixDeck.Plugin.Argus
-          path: src/LoupixDeck.Plugin.Argus
-
-      - name: Checkout SpotifyPremium plugin
-        uses: actions/checkout@v5
-        with:
-          repository: RadiatorTwo/LoupixDeck.Plugin.SpotifyPremium
-          path: src/LoupixDeck.Plugin.SpotifyPremium
-
-      - name: Setup .NET SDK
-        uses: actions/setup-dotnet@v5
-        with:
-          dotnet-version: 9.0.x
-
-      - name: Build Plugin SDK package
-        run: dotnet build src/LoupixDeck.PluginSdk -c Release
-
-      - name: Upload Plugin SDK package
-        uses: actions/upload-artifact@v5
-        with:
-          name: plugin-sdk
-          path: src/LoupixDeck.PluginSdk/nupkg
-
-      - name: Build and assemble plugins
-        run: |
-          set -euo pipefail
-          mkdir -p plugins
-          for repo in \
-            LoupixDeck.Plugin.Obs \
-            LoupixDeck.Plugin.Elgato \
-            LoupixDeck.Plugin.HwInfo \
-            LoupixDeck.Plugin.CoolerControl \
-            LoupixDeck.Plugin.Audio \
-            LoupixDeck.Plugin.Argus \
-            LoupixDeck.Plugin.SpotifyPremium
-          do
-            echo "::group::Building $repo"
-            manifest="src/$repo/plugin.json"
-            id=$(jq -r '.id' "$manifest")
-            if [ -z "$id" ] || [ "$id" = "null" ]; then
-              echo "Plugin $repo has no 'id' in plugin.json" >&2
-              exit 1
-            fi
-            dotnet build "src/$repo/$repo.csproj" -c Release -o "build/$repo" /p:DebugSymbols=false /p:DebugType=none
-            mkdir -p "plugins/$id"
-            find "build/$repo" -mindepth 1 -maxdepth 1 ! -name '*.pdb' ! -name '*.runtimeconfig.json' -exec cp -r {} "plugins/$id/" \;
-            cp "$manifest" "plugins/$id/plugin.json"
-            echo "::endgroup::"
-          done
-          echo "Assembled plugins:"
-          ls -R plugins
-
-      - name: Upload plugins artifact
-        uses: actions/upload-artifact@v5
-        with:
-          name: plugins
-          path: plugins
-
   build-windows:
     name: Build Windows
     runs-on: windows-latest
-    needs: build-plugins
 
     env:
-      PROJECT_PATH: ./LoupixDeck.csproj
+      PROJECT_PATH: ./LoupixDeck/LoupixDeck.csproj
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
+          submodules: recursive
 
       - name: Extract version from tag
         run: |
@@ -136,24 +37,7 @@ jobs:
       - name: Setup .NET SDK
         uses: actions/setup-dotnet@v5
         with:
-          dotnet-version: 9.0.x
-
-      - name: Download Plugin SDK package
-        uses: actions/download-artifact@v5
-        with:
-          name: plugin-sdk
-          path: .sdk-feed
-
-      - name: Point nuget.config at the built SDK feed
-        run: |
-          Set-Content -Path nuget.config -Encoding utf8 -Value @(
-            '<?xml version="1.0" encoding="utf-8"?>',
-            '<configuration>',
-            '  <packageSources>',
-            '    <add key="LoupixDeck.PluginSdk (ci)" value=".sdk-feed" />',
-            '  </packageSources>',
-            '</configuration>'
-          )
+          dotnet-version: 10.0.x
 
       - name: Restore dependencies
         run: dotnet restore $env:PROJECT_PATH
@@ -168,42 +52,81 @@ jobs:
             /p:Version=$env:VERSION `
             -o publish/win-x64
 
-      - name: Download plugins artifact
-        uses: actions/download-artifact@v5
-        with:
-          name: plugins
-          path: plugins-artifact
-
-      - name: Bundle plugins into publish output
+      # Place the native renderer libs (Skia / HarfBuzz / ANGLE) loose next to the single-file exe.
+      # The app self-extracts identical libs from its bundle, but a stray copy earlier on the DLL
+      # search path can shadow the bundled version and crash the app with a version mismatch; a loose
+      # copy in the app directory wins that search-order race. It also lets the setup's NativeBootstrap
+      # hoist these root-level libs out of the payload for its own Avalonia UI. A non-single-file
+      # publish is used purely to let NuGet resolve the exact matching native versions.
+      - name: Harvest native renderer libraries
         run: |
-          New-Item -ItemType Directory -Force -Path publish/win-x64/plugins | Out-Null
-          Copy-Item -Path plugins-artifact/* -Destination publish/win-x64/plugins -Recurse -Force
+          dotnet publish $env:PROJECT_PATH -c Release -r win-x64 --self-contained true `
+            /p:PublishSingleFile=false `
+            /p:PublishTrimmed=false `
+            /p:ReadyToRun=false `
+            /p:Version=$env:VERSION `
+            -o publish/win-x64-natives
+          $prefixes = 'libSkiaSharp', 'libHarfBuzzSharp', 'av_'
+          $copied = 0
+          Get-ChildItem -Path publish/win-x64-natives -Filter *.dll | ForEach-Object {
+            $name = $_.Name
+            if ($prefixes | Where-Object { $name.StartsWith($_, [System.StringComparison]::OrdinalIgnoreCase) }) {
+              Copy-Item $_.FullName -Destination publish/win-x64 -Force
+              $copied++
+            }
+          }
+          if ($copied -eq 0) { throw "No native renderer libraries were harvested" }
+          Remove-Item publish/win-x64-natives -Recurse -Force
+          Write-Host "Placed $copied native lib(s) in the payload root."
 
       - name: Zip Windows build
         run: |
           Get-ChildItem -Path publish/win-x64 -Filter *.pdb -Recurse | Remove-Item -Force
           Compress-Archive -Path publish/win-x64/* -DestinationPath LoupixDeck-win-x64.zip
 
-      - name: Upload Windows zip to release
+      # Tiny native uninstaller (no payload) — embedded into the setup and written into the install dir.
+      - name: Build uninstaller
+        run: |
+          dotnet publish ./LoupixDeck.Uninstall/LoupixDeck.Uninstall.csproj -c Release -r win-x64 `
+            /p:Version=$env:VERSION `
+            -o publish/uninstall
+
+      # Native single-exe installer (NativeAOT). The just-built zip IS the payload: its entries
+      # (LoupixDeck.exe, ...) sit at the archive root, exactly what the installer's
+      # PayloadExtractor expects. windows-latest ships the MSVC toolchain ILC needs for AOT linking.
+      - name: Build installer
+        run: |
+          $payload = (Resolve-Path LoupixDeck-win-x64.zip).Path
+          $uninstaller = (Resolve-Path publish/uninstall/LoupixDeck.Uninstall.exe).Path
+          dotnet publish ./LoupixDeck.Setup/LoupixDeck.Setup.csproj -c Release -r win-x64 `
+            /p:Version=$env:VERSION `
+            /p:PayloadZip=$payload `
+            /p:UninstallerExe=$uninstaller `
+            -o publish/setup
+          Copy-Item publish/setup/LoupixDeck.Setup.exe LoupixDeck-Setup-win-x64.exe -Force
+
+      - name: Upload Windows assets to release
         uses: softprops/action-gh-release@v3
         with:
-          files: LoupixDeck-win-x64.zip
+          files: |
+            LoupixDeck-win-x64.zip
+            LoupixDeck-Setup-win-x64.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   build-linux:
     name: Build Linux
     runs-on: ubuntu-latest
-    needs: build-plugins
 
     env:
-      PROJECT_PATH: ./LoupixDeck.csproj
+      PROJECT_PATH: ./LoupixDeck/LoupixDeck.csproj
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
+          submodules: recursive
 
       - name: Extract version from tag
         run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_ENV
@@ -211,23 +134,7 @@ jobs:
       - name: Setup .NET SDK
         uses: actions/setup-dotnet@v5
         with:
-          dotnet-version: 9.0.x
-
-      - name: Download Plugin SDK package
-        uses: actions/download-artifact@v5
-        with:
-          name: plugin-sdk
-          path: .sdk-feed
-
-      - name: Point nuget.config at the built SDK feed
-        run: |
-          printf '%s\n' \
-            '<?xml version="1.0" encoding="utf-8"?>' \
-            '<configuration>' \
-            '  <packageSources>' \
-            '    <add key="LoupixDeck.PluginSdk (ci)" value=".sdk-feed" />' \
-            '  </packageSources>' \
-            '</configuration>' > nuget.config
+          dotnet-version: 10.0.x
 
       - name: Restore dependencies
         run: dotnet restore ${{ env.PROJECT_PATH }}
@@ -242,17 +149,6 @@ jobs:
             /p:Version=${{ env.VERSION }} \
             -o publish/linux-x64
 
-      - name: Download plugins artifact
-        uses: actions/download-artifact@v5
-        with:
-          name: plugins
-          path: plugins-artifact
-
-      - name: Bundle plugins into publish output
-        run: |
-          mkdir -p publish/linux-x64/plugins
-          cp -r plugins-artifact/. publish/linux-x64/plugins/
-
       - name: Tar Linux build
         run: |
           find publish/linux-x64 -name '*.pdb' -delete
@@ -263,5 +159,25 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           files: LoupixDeck-linux-x64.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # The in-app updater (LoupixDeck/Services/Updates) finds its download by the fixed asset names
+  # LoupixDeck-Setup-win-x64.exe and install-loupixdeck.sh and verifies it against the SHA-256
+  # digest GitHub records for every release asset. Keep the names stable.
+  publish-install-script:
+    name: Publish install script
+    runs-on: ubuntu-latest
+    needs: build-linux
+    if: github.event_name == 'release'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Upload install script to release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: install-loupixdeck.sh
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

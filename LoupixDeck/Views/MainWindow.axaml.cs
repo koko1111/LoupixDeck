@@ -1,0 +1,458 @@
+using System.ComponentModel;
+using Avalonia;
+using Avalonia.Controls;
+using Avalonia.Input;
+using Avalonia.Interactivity;
+using Avalonia.Platform;
+using CommunityToolkit.Mvvm.Input;
+using LoupixDeck.Models;
+using LoupixDeck.Utils;
+using LoupixDeck.ViewModels;
+using LoupixDeck.Views.Devices;
+
+namespace LoupixDeck.Views;
+
+public partial class MainWindow : Window
+{
+    private static TrayIcon _trayIcon;
+    private bool _isMinimizedToTray;
+
+    // Static Commands
+    private IRelayCommand ShowCommand => field ??= Relay.Create(() => Instance?.ShowFromTray());
+    private IRelayCommand QuitCommand => field ??= Relay.Create(() => Instance?.QuitApplication());
+    private IRelayCommand ToggleDeviceCommand => field ??= Relay.Create(() =>
+            Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+                Instance?.ViewModel?.SelectedDevice?.ToggleDeviceStateCommand?.Execute(null)));
+
+    internal static MainWindow Instance { get; private set; }
+
+    public MainShellViewModel ViewModel => DataContext as MainShellViewModel;
+
+    private MainShellViewModel _shell;
+    private DeviceDragDrop _dragDrop;
+    private ActionPanelWindow _panelWindow;
+    private FolderPanelWindow _folderPanelWindow;
+
+    public MainWindow()
+    {
+        InitializeComponent();
+
+        Instance = this;
+
+        CreateTrayIcon();
+        InitDragDrop();
+
+        this.Closing += OnWindowClosing;
+        this.DataContextChanged += OnDataContextChanged;
+    }
+
+    /// <summary>
+    /// Wire the window-level drag &amp; drop overlay (issue #166 phase 3). Pointer events are
+    /// handled as tunneling (preview) so the drag machine sees them regardless of the buttons; a
+    /// drag only starts past a movement threshold, so a plain click still selects and a
+    /// double-click still edits. Operations run against the active device's view model.
+    /// </summary>
+    private void InitDragDrop()
+    {
+        _dragDrop = new DeviceDragDrop(
+            this.FindControl<Grid>("RootGrid"),
+            this.FindControl<Canvas>("DragOverlay"),
+            this.FindControl<Border>("DragGhost"),
+            this.FindControl<Image>("DragGhostImage"),
+            this.FindControl<Border>("DropHighlight"),
+            () => ViewModel?.SelectedDevice);
+
+        AddHandler(PointerPressedEvent, OnPreviewPointerPressed, RoutingStrategies.Tunnel, handledEventsToo: true);
+        AddHandler(PointerMovedEvent, OnPreviewPointerMoved, RoutingStrategies.Tunnel, handledEventsToo: true);
+        AddHandler(PointerReleasedEvent, OnPreviewPointerReleased, RoutingStrategies.Tunnel, handledEventsToo: true);
+        AddHandler(PointerCaptureLostEvent, OnPreviewPointerCaptureLost, RoutingStrategies.Tunnel | RoutingStrategies.Bubble, handledEventsToo: true);
+    }
+
+    private void OnPreviewPointerPressed(object sender, PointerPressedEventArgs e) => _dragDrop?.PointerPressed(e);
+    private void OnPreviewPointerMoved(object sender, PointerEventArgs e) => _dragDrop?.PointerMoved(e);
+    private void OnPreviewPointerReleased(object sender, PointerReleasedEventArgs e) => _dragDrop?.PointerReleased(e);
+    private void OnPreviewPointerCaptureLost(object sender, PointerCaptureLostEventArgs e) => _dragDrop?.PointerCaptureLost(e);
+
+    /// <summary>
+    /// Pick the device-specific UserControl when DI hands us a VM. The child
+    /// inherits DataContext, so its existing LoupedeckController.Config bindings
+    /// resolve unchanged. Unknown slugs fall through to Live S to keep something
+    /// rendered rather than a blank window.
+    /// </summary>
+    private void OnDataContextChanged(object sender, System.EventArgs e)
+    {
+        _shell?.PropertyChanged -= OnShellPropertyChanged;
+        _shell?.UpdateFound -= OnUpdateFound;
+        _shell = DataContext as MainShellViewModel;
+        _shell?.PropertyChanged += OnShellPropertyChanged;
+        _shell?.UpdateFound += OnUpdateFound;
+
+        // The deck first, then the panel beside it: the other order puts an empty panel on screen
+        // before there is anything for it to sit next to.
+        UpdateDeviceLayout();
+        TrackActionPanel();
+        TrackFolderPanel();
+    }
+
+    /// <summary>
+    /// A visible window already shows the update hint; a window in the tray or on the taskbar gets
+    /// an OS notification instead, since nobody would see the hint there.
+    /// </summary>
+    private void OnUpdateFound(Services.Updates.UpdateInfo update)
+    {
+        if (!_isMinimizedToTray && WindowState != WindowState.Minimized) return;
+
+        _shell?.NotifyUpdate(update, TryGetPlatformHandle()?.Handle ?? IntPtr.Zero);
+    }
+
+    private void OnShellPropertyChanged(object sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName != nameof(MainShellViewModel.SelectedDevice)) return;
+
+        UpdateDeviceLayout();
+        TrackActionPanel();
+        TrackFolderPanel();
+    }
+
+    // The apps/actions panel whose open state we currently follow, so it can be unhooked on a
+    // device switch.
+    private ViewModels.ActionPanel.ActionPanelViewModel _panel;
+
+    private void TrackActionPanel()
+    {
+        ViewModels.ActionPanel.ActionPanelViewModel panel = _shell?.SelectedDevice?.ActionPanel;
+
+        // Devices come and go during start-up and on hot-plug, and the selection is briefly empty
+        // in between. Holding on to the last panel through that keeps it from collapsing and
+        // reopening every time, which was the worst of the start-up flicker.
+        if (panel == null || ReferenceEquals(panel, _panel)) return;
+
+        // The panel of the device switched to may have missed nothing, but a device that was not
+        // shown is the likeliest to hold a catalogue older than the latest profile or macro edits.
+        panel.RequestCatalogueRefresh();
+
+        if (_panel != null)
+        {
+            _panel.PropertyChanged -= OnActionPanelPropertyChanged;
+
+            // Each device owns its panel, but whether the panel is showing is a window-level
+            // choice: carry it over so a device switch neither opens nor closes it.
+            panel.IsOpen = _panel.IsOpen;
+        }
+
+        _panel = panel;
+        _panel.PropertyChanged += OnActionPanelPropertyChanged;
+
+        ApplyActionPanelState();
+    }
+
+    private void OnActionPanelPropertyChanged(object sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(ViewModels.ActionPanel.ActionPanelViewModel.IsOpen))
+            ApplyActionPanelState();
+    }
+
+    /// <summary>
+    /// Shows or hides the apps and actions panel, which is its own window flanged to this one's
+    /// left edge.
+    /// </summary>
+    /// <remarks>
+    /// A separate window rather than a column in this one, so that opening the panel never changes
+    /// this window's size or position: Avalonia applies a window's size and its content in separate
+    /// passes, so any variant that widened this window rendered it resized before it rendered its
+    /// new content, which read as the whole window flickering.
+    /// </remarks>
+    private void ApplyActionPanelState()
+    {
+        bool open = _panel?.IsOpen == true;
+
+        if (!open)
+        {
+            _panelWindow?.Hide();
+            return;
+        }
+
+        if (_panelWindow == null)
+        {
+            _panelWindow = new ActionPanelWindow();
+            _panelWindow.Attach(this, _dragDrop);
+        }
+
+        _panelWindow.DataContext = _panel;
+        _panelWindow.Show(this);
+        _panelWindow.FollowOwner();
+    }
+
+    /// <summary>Hides the panels with their owner, for the tray, and brings them back with it.</summary>
+    private void SyncPanelVisibility()
+    {
+        if (_panelWindow != null)
+        {
+            if (IsVisible && _panel?.IsOpen == true)
+            {
+                _panelWindow.Show(this);
+                _panelWindow.FollowOwner();
+            }
+            else
+            {
+                _panelWindow.Hide();
+            }
+        }
+
+        if (_folderPanelWindow != null)
+        {
+            if (IsVisible && _folderPanel?.IsOpen == true)
+            {
+                _folderPanelWindow.Show(this);
+                _folderPanelWindow.FollowOwner();
+            }
+            else
+            {
+                _folderPanelWindow.Hide();
+            }
+        }
+    }
+
+    // The custom folder panel (issue #249) whose open state we follow; same rules as the apps panel.
+    private ViewModels.FolderPanel.FolderPanelViewModel _folderPanel;
+
+    private void TrackFolderPanel()
+    {
+        ViewModels.FolderPanel.FolderPanelViewModel panel = _shell?.SelectedDevice?.FolderPanel;
+        if (panel == null || ReferenceEquals(panel, _folderPanel)) return;
+
+        if (_folderPanel != null)
+        {
+            _folderPanel.PropertyChanged -= OnFolderPanelPropertyChanged;
+
+            // Whether the panel is showing is a window-level choice, carried across a device switch.
+            panel.IsOpen = _folderPanel.IsOpen;
+        }
+
+        _folderPanel = panel;
+        _folderPanel.PropertyChanged += OnFolderPanelPropertyChanged;
+
+        ApplyFolderPanelState();
+    }
+
+    private void OnFolderPanelPropertyChanged(object sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(ViewModels.FolderPanel.FolderPanelViewModel.IsOpen))
+            ApplyFolderPanelState();
+    }
+
+    /// <summary>Shows or hides the folder panel, its own window flanged to this one's right edge.</summary>
+    private void ApplyFolderPanelState()
+    {
+        if (_folderPanel?.IsOpen != true)
+        {
+            _folderPanelWindow?.Hide();
+            return;
+        }
+
+        if (_folderPanelWindow == null)
+        {
+            _folderPanelWindow = new FolderPanelWindow();
+            _folderPanelWindow.Attach(this, _dragDrop);
+        }
+
+        _folderPanelWindow.DataContext = _folderPanel;
+        _folderPanelWindow.Show(this);
+        _folderPanelWindow.FollowOwner();
+    }
+
+    /// <summary>Swap the DeviceLayoutHost to the selected device's layout, with that
+    /// device's view model as its DataContext (the layout binds MainWindowViewModel
+    /// members, but the window DataContext is the shell).</summary>
+    private void UpdateDeviceLayout()
+    {
+        var host = this.FindControl<ContentControl>("DeviceLayoutHost");
+        if (host == null) return;
+
+        var vm = _shell?.SelectedDevice;
+        if (vm == null)
+        {
+            host.Content = null;
+            return;
+        }
+
+        host.Content = vm.DeviceSlug switch
+        {
+            // The Loupedeck Live is hardware-identical to the Razer Stream Controller
+            // (480×270 split display, 4×3 grid, 2 side strips, 6 knobs, 8 LED buttons),
+            // so it reuses the Razer editor layout. The on-screen chassis art is the
+            // Razer body until a dedicated Loupedeck Live SVG is added.
+            "razer-stream-controller" or "loupedeck-live" => new RazerStreamControllerLayout { DataContext = vm },
+            // Fifteen physical keys and nothing else — no knobs, LEDs or side strips.
+            // Without this arm it would fall through to the Live S layout below.
+            "razer-stream-controller-x" => new RazerStreamControllerXLayout { DataContext = vm },
+            "loupedeck-ct" => new LoupedeckCtLayout { DataContext = vm },
+            _ => new LoupedeckLiveSLayout { DataContext = vm }
+        };
+
+        FitWindowToDeviceLayout();
+    }
+
+    /// <summary>
+    /// Sizes the window to the layout just swapped in, larger or smaller.
+    /// </summary>
+    /// <remarks>
+    /// Sizing to content only lasts until the user resizes the window by hand: Avalonia then drops
+    /// the dragged dimension from <see cref="Window.SizeToContent"/>, and a later device switch
+    /// would keep the old size — clipping a larger layout, leaving empty space around a smaller
+    /// one. A manual size belongs to the layout it was made for, so a switch hands sizing back to
+    /// the content. A maximized window stays maximized.
+    /// </remarks>
+    private void FitWindowToDeviceLayout()
+    {
+        if (WindowState != WindowState.Normal || SizeToContent == SizeToContent.WidthAndHeight) return;
+
+        // A resize by hand also pins Width and Height, which would otherwise keep constraining the
+        // measure the content sizing relies on.
+        ClearValue(WidthProperty);
+        ClearValue(HeightProperty);
+        SizeToContent = SizeToContent.WidthAndHeight;
+    }
+
+    /// <summary>
+    /// Called by App.OnViewModelCreated before Show() to mark the window as
+    /// already-minimized when StartMinimizedToTray is on. Avoids the brief
+    /// Show→Hide flash we'd get if we hid the window after it was shown.
+    /// </summary>
+    internal void MarkStartedMinimized()
+    {
+        _isMinimizedToTray = true;
+    }
+
+    private void CreateTrayIcon()
+    {
+        if (_trayIcon != null) return;
+
+        _trayIcon = new TrayIcon
+        {
+            Icon = new WindowIcon(AssetLoader.Open(new Uri("avares://LoupixDeck/Assets/logo.ico"))),
+            ToolTipText = "LoupixDeck",
+            IsVisible = true,
+            Menu = new NativeMenu()
+        };
+
+        var showMenuItem = new NativeMenuItem("Show") { Command = ShowCommand };
+        var toggleMenuItem = new NativeMenuItem("Toggle device on/off") { Command = ToggleDeviceCommand };
+        var quitMenuItem = new NativeMenuItem("Quit") { Command = QuitCommand };
+
+        _trayIcon.Menu?.Items.Add(showMenuItem);
+        _trayIcon.Menu?.Items.Add(toggleMenuItem);
+        _trayIcon.Menu?.Items.Add(new NativeMenuItemSeparator());
+        _trayIcon.Menu?.Items.Add(quitMenuItem);
+
+        _trayIcon.Clicked += (_, _) => ShowFromTray();
+    }
+
+    private void OnWindowClosing(object sender, WindowClosingEventArgs e)
+    {
+        // Already on the way out (via tray Quit / hamburger Quit) — let it close.
+        if (_isQuitting) return;
+
+        var behavior = ViewModel?.SelectedDevice?.LoupedeckController?.Config?.CloseButtonBehavior
+                       ?? CloseButtonBehavior.MinimizeToTray;
+
+        if (behavior == CloseButtonBehavior.Quit)
+        {
+            // Let the window close naturally, then exit the process so the
+            // classic-desktop lifetime doesn't keep us alive with no MainWindow.
+            QuitApplication();
+            return;
+        }
+
+        if (!_isMinimizedToTray)
+        {
+            e.Cancel = true;
+            MinimizeToTray();
+        }
+    }
+
+    private void MinimizeToTray()
+    {
+        Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+        {
+            if (_isMinimizedToTray) return;
+            _isMinimizedToTray = true;
+            Hide();
+            SyncPanelVisibility();
+        });
+    }
+
+    private void ShowFromTray()
+    {
+        Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+        {
+            _isMinimizedToTray = false;
+            Show();
+            WindowState = WindowState.Normal;
+            Activate();
+            SyncPanelVisibility();
+        });
+    }
+
+    /// <summary>
+    /// Toggles between visible and tray-minimized. Used by the System.ToggleWindow
+    /// command so an external trigger (button on the device, CLI) can bring the
+    /// window back without going through the tray icon.
+    /// </summary>
+    internal void ToggleVisibility()
+    {
+        if (IsVisible) MinimizeToTray();
+        else ShowFromTray();
+    }
+
+    private bool _isQuitting;
+
+    /// <summary>
+    /// Quits from outside the window — a system shutdown or a SIGTERM, where there is no
+    /// click to hang the teardown off. No-op before the window exists (start-up failures shut
+    /// the lifetime down on their own, with no device to hand back yet).
+    /// </summary>
+    internal static void RequestQuit() => Instance?.QuitApplication();
+
+    public void QuitApplication()
+    {
+        _isQuitting = true;
+        _trayIcon?.Dispose();
+        _trayIcon = null;
+
+        // Cleanly shut down every device before the process dies. Critically this stops a
+        // running screensaver and closes the serial port, so we never cut a full-screen
+        // framebuffer write mid-stream — an interrupted write leaves the device's protocol
+        // desynced and makes the next launch's handshake time out until a power-cycle.
+        try
+        {
+            if (Program.AppServices?.GetService(typeof(Services.IDeviceHostRegistry))
+                is Services.IDeviceHostRegistry hostRegistry)
+            {
+                foreach (var host in hostRegistry.Hosts)
+                {
+                    try { host.Controller.Shutdown(); }
+                    catch { /* best effort — never block shutdown */ }
+                }
+            }
+        }
+        catch
+        {
+            // best effort — never block shutdown
+        }
+
+        // Give the (shared, root-resident) loaded plugins a chance to shut down
+        // cleanly (close connections, stop poll loops) before the process exits.
+        try
+        {
+            (Program.AppServices?.GetService(typeof(Services.Plugins.IPluginManager))
+                as Services.Plugins.IPluginManager)?.ShutdownAll();
+        }
+        catch
+        {
+            // best effort — never block shutdown
+        }
+
+        Environment.Exit(0);
+    }
+}

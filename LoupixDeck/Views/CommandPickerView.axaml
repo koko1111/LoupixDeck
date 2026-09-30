@@ -1,0 +1,212 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:loc="using:LoupixDeck.Localization"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:vm="using:LoupixDeck.ViewModels.CommandPicker"
+             mc:Ignorable="d"
+             x:Class="LoupixDeck.Views.CommandPickerView"
+             x:DataType="vm:CommandPickerViewModel"
+             x:CompileBindings="True">
+
+    <UserControl.Styles>
+        <StyleInclude Source="avares://LoupixDeck/Views/Styles/SettingsStyles.axaml" />
+        <StyleInclude Source="avares://LoupixDeck/Views/Styles/CommandPickerStyles.axaml" />
+    </UserControl.Styles>
+
+    <!-- Implicit templates resolved by data type: command rows (detail list + search
+         results) and drillable sub-folders (detail list only). -->
+    <UserControl.DataTemplates>
+        <!-- Command row: selectable + draggable, carries the insertion payload. -->
+        <DataTemplate DataType="vm:CommandRowViewModel">
+            <Border Classes="picker-row-face"
+                    Classes.selected="{Binding IsSelected}"
+                    Classes.info="{Binding !IsSelectable}"
+                    Focusable="{Binding IsSelectable}"
+                    PointerPressed="Row_PointerPressed"
+                    DoubleTapped="Row_DoubleTapped"
+                    KeyDown="Row_KeyDown">
+                <!-- The row uses its full width: the insertion affordance lives in the
+                     footer, so nothing overlays the description. -->
+                <StackPanel VerticalAlignment="Center">
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                        <TextBlock Classes="picker-row-title" Text="{Binding Title}" />
+                        <!-- Badge for a rotary command group (fills several slots at once). -->
+                        <Border Classes="picker-group-badge" IsVisible="{Binding IsCommandGroup}"
+                                ToolTip.Tip="{loc:Tr CommandPicker_FillsAllRotaryActionsTurn}">
+                            <TextBlock Text="{loc:Tr CommandPicker_Group}" />
+                        </Border>
+                    </StackPanel>
+                    <TextBlock Classes="picker-row-desc" Text="{Binding Description}"
+                               IsVisible="{Binding HasDescription}" />
+                </StackPanel>
+            </Border>
+        </DataTemplate>
+
+        <!-- Group node: an inline accordion header that expands/collapses its children
+             (command rows and/or further nested groups → resolved recursively). -->
+        <DataTemplate DataType="vm:CommandGroupNodeViewModel">
+            <StackPanel>
+                <ToggleButton Classes="picker-group"
+                              IsChecked="{Binding IsExpanded, Mode=TwoWay}"
+                              ToolTip.Tip="{loc:Tr CommandPicker_ExpandCollapseGroup}">
+                    <!-- Inset on the grid (presenter padding is 0 for full-bleed
+                         hover). Right 20px is the overlay-scrollbar gutter. -->
+                    <Grid ColumnDefinitions="Auto,Auto,*,Auto" Margin="10,4,20,4">
+                        <TextBlock Grid.Column="0" Classes="picker-group-chevron" />
+                        <TextBlock Grid.Column="1" Classes="picker-rail-icon" Text="{Binding Icon}" />
+                        <TextBlock Grid.Column="2" Classes="picker-group-title" Text="{Binding Title}" />
+                        <Border Grid.Column="3" Classes="picker-count">
+                            <TextBlock Text="{Binding Count}" />
+                        </Border>
+                    </Grid>
+                </ToggleButton>
+                <!-- Nested content, indented; implicit templates resolve rows vs. groups. -->
+                <ItemsControl ItemsSource="{Binding Children}"
+                              IsVisible="{Binding IsExpanded}"
+                              Margin="12,0,0,0" />
+            </StackPanel>
+        </DataTemplate>
+    </UserControl.DataTemplates>
+
+    <!-- Master-detail: slim group rail on the left, the selected group's command list
+         on the right over the panel's full height. -->
+    <Grid ColumnDefinitions="Auto,*" KeyDown="Root_KeyDown">
+
+        <!-- ===== 1. Group rail: sections as captions, categories as entries ===== -->
+        <Border Grid.Column="0" Classes="picker-rail">
+            <ScrollViewer VerticalScrollBarVisibility="Hidden"
+                          HorizontalScrollBarVisibility="Disabled">
+                <ItemsControl ItemsSource="{Binding Sections}" Margin="0,0,0,8">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:CommandSectionViewModel">
+                            <StackPanel>
+                                <TextBlock Classes="picker-rail-caption" Text="{Binding Caption}" />
+                                <ItemsControl ItemsSource="{Binding Categories}">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate x:DataType="vm:CommandCategoryViewModel">
+                                            <Button Classes="picker-rail-item" Click="RailItem_Click"
+                                                    ToolTip.Tip="{Binding Title}">
+                                                <Border Classes="picker-rail-face"
+                                                        Classes.selected="{Binding IsSelected}">
+                                                    <Grid ColumnDefinitions="Auto,*,Auto">
+                                                        <TextBlock Grid.Column="0" Classes="picker-rail-icon"
+                                                                   Text="{Binding Icon}" />
+                                                        <TextBlock Grid.Column="1" Classes="picker-rail-title"
+                                                                   Text="{Binding Title}" />
+                                                        <TextBlock Grid.Column="2" Classes="picker-rail-count"
+                                                                   Text="{Binding Count}" />
+                                                    </Grid>
+                                                </Border>
+                                            </Button>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </StackPanel>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </ScrollViewer>
+        </Border>
+
+        <!-- ===== 2. Detail pane: search → header → command list → footer ===== -->
+        <Grid Grid.Column="1" RowDefinitions="Auto,*,Auto">
+
+            <!-- Search bar. The search spans every group, so its results replace the
+                 selected group's list rather than filtering within it. -->
+            <Border Grid.Row="0" Padding="8"
+                    BorderBrush="{DynamicResource AppBorderSubtle}" BorderThickness="0,0,0,1">
+                <Border Background="{DynamicResource AppControlBackground}"
+                        BorderBrush="{DynamicResource AppBorderSubtle}" BorderThickness="1"
+                        CornerRadius="6" Padding="8,2" MinHeight="30">
+                    <Grid ColumnDefinitions="Auto,*,Auto">
+                        <TextBlock Grid.Column="0" FontFamily="{DynamicResource MdiFont}"
+                                   Text="&#xF0349;" FontSize="16"
+                                   Foreground="{DynamicResource AppTextSecondary}"
+                                   VerticalAlignment="Center" Margin="0,0,8,0" />
+                        <TextBox Grid.Column="1" Name="SearchBox"
+                                 Text="{Binding SearchText, Mode=TwoWay}"
+                                 PlaceholderText="{loc:Tr CommandPicker_SearchCommands}"
+                                 FontSize="12"
+                                 Padding="0" MinHeight="0"
+                                 BorderThickness="0" Background="Transparent"
+                                 VerticalAlignment="Center" />
+                        <Border Grid.Column="2" Classes="picker-kbd">
+                            <TextBlock Text="Ctrl K" />
+                        </Border>
+                    </Grid>
+                </Border>
+            </Border>
+
+            <!-- The selected group's list and the search results share this region;
+                 exactly one of them is visible. -->
+            <Panel Grid.Row="1">
+
+                <!-- Selected group (normal mode). Rendered through a template on
+                     SelectedCategory so the inner bindings stay unevaluated while no
+                     group is picked (IsVisible alone does not stop binding). -->
+                <ContentControl IsVisible="{Binding IsDetailVisible}"
+                                Content="{Binding SelectedCategory}">
+                    <ContentControl.ContentTemplate>
+                        <DataTemplate DataType="vm:CommandCategoryViewModel">
+                            <Grid RowDefinitions="Auto,*">
+                                <Border Grid.Row="0" Classes="picker-detail-header">
+                                    <Grid ColumnDefinitions="*,Auto">
+                                        <TextBlock Grid.Column="0" Classes="picker-detail-title"
+                                                   Text="{Binding Title}" />
+                                        <TextBlock Grid.Column="1" Classes="picker-detail-count"
+                                                   Text="{loc:TrFormat CommandPicker_CommandsCountFmt, Count}" />
+                                    </Grid>
+                                </Border>
+                                <ScrollViewer Grid.Row="1"
+                                              VerticalScrollBarVisibility="Auto"
+                                              HorizontalScrollBarVisibility="Disabled">
+                                    <ItemsControl ItemsSource="{Binding DetailNodes}" />
+                                </ScrollViewer>
+                            </Grid>
+                        </DataTemplate>
+                    </ContentControl.ContentTemplate>
+                </ContentControl>
+
+                <!-- Search results (search mode): matches grouped by their source path. -->
+                <ScrollViewer IsVisible="{Binding IsSearching}"
+                              VerticalScrollBarVisibility="Auto"
+                              HorizontalScrollBarVisibility="Disabled">
+                    <ItemsControl ItemsSource="{Binding SearchResults}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="vm:CommandSearchGroupViewModel">
+                                <StackPanel>
+                                    <Border Classes="picker-result-header">
+                                        <Grid ColumnDefinitions="Auto,*,Auto">
+                                            <TextBlock Grid.Column="0" Classes="picker-rail-icon"
+                                                       Text="{Binding Icon}" />
+                                            <TextBlock Grid.Column="1" Classes="picker-result-group"
+                                                       Text="{Binding Title}" />
+                                            <TextBlock Grid.Column="2" Classes="picker-rail-count"
+                                                       Text="{Binding Commands.Count}" />
+                                        </Grid>
+                                    </Border>
+                                    <ItemsControl ItemsSource="{Binding Commands}" />
+                                </StackPanel>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </ScrollViewer>
+            </Panel>
+
+            <!-- Footer: names the selected row and carries the insertion button, so the
+                 affordance never overlays the list. -->
+            <Border Grid.Row="2" Classes="picker-footer">
+                <Grid ColumnDefinitions="*,Auto">
+                    <TextBlock Grid.Column="0" Classes="picker-footer-text"
+                               Text="{Binding SelectedCommandLabel}" />
+                    <Button Grid.Column="1" Classes="picker-footer-add"
+                            Content="{loc:Tr CommandPicker_Add}"
+                            IsEnabled="{Binding HasSelectedCommand}"
+                            Click="Add_Click"
+                            ToolTip.Tip="{loc:Tr CommandPicker_AddTheSelectedCommandTo}" />
+                </Grid>
+            </Border>
+        </Grid>
+    </Grid>
+</UserControl>

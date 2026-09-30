@@ -181,6 +181,11 @@ DocProject/Help/html
 # Click-Once directory
 publish/
 
+# LoupixDeck installer build output (see build-setup.ps1)
+/LoupixDeck-Setup-*.exe
+/payload.zip
+/plugins-src/
+
 # Publish Web Output
 *.[Pp]ublish.xml
 *.azurePubxml
@@ -407,3 +412,14 @@ CLAUDE.md
 .github/copilot-instructions.md
 package.json
 package-lock.json
+/plans/
+/build-setup.ps1
+
+# Per-developer launch profiles
+**/Properties/launchSettings.json
+
+# Local build Artifacts
+LoupixDeck.PluginSdk/nupkg/
+
+# Local demo material (not part of the repo)
+/docs/demo/

@@ -1,0 +1,1359 @@
+using System.Collections.ObjectModel;
+using Avalonia;
+using Avalonia.Styling;
+using Avalonia.Threading;
+using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
+using LoupixDeck.Controllers;
+using LoupixDeck.Localization;
+using LoupixDeck.Models;
+using LoupixDeck.Registry;
+using LoupixDeck.Models.Converter;
+using LoupixDeck.PluginSdk;
+using LoupixDeck.Services;
+using LoupixDeck.Services.Companion;
+using LoupixDeck.Services.Diagnostics;
+using LoupixDeck.Services.Plugins;
+using LoupixDeck.Services.Portable;
+using LoupixDeck.Services.Updates;
+using LoupixDeck.Utils;
+using LoupixDeck.ViewModels.Base;
+using LoupixDeck.ViewModels.Diagnostics;
+using SkiaSharp;
+
+namespace LoupixDeck.ViewModels;
+
+public partial class SettingsViewModel : DialogViewModelBase<DialogResult>
+{
+    public LoupedeckConfig Config { get; }
+
+    /// <summary>False on a device without a haptic motor — the haptic card is hidden
+    /// rather than shown doing nothing.</summary>
+    public bool IsVibrationSupported { get; }
+
+    private readonly IDeviceService _deviceService;
+    private readonly IPageManager _pageManager;
+    private readonly IDialogService _dialogService;
+    private readonly IInterceptionService _interceptionService;
+    private readonly IPluginManager _pluginManager;
+    private readonly IAutostartService _autostart;
+    private readonly IWorkspaceActivationService _activation;
+    private readonly IProfileEditingService _profileEditing;
+    private readonly IProfilePackageService _packageService;
+    private readonly IScreensaverProviderRegistry _screensaverRegistry;
+    private readonly IExclusiveModeService _exclusiveMode;
+    private readonly IUpdateService _updateService;
+    private readonly ICompanionCoordinator _companions;
+    private readonly ICompanionContextSync _contextSync;
+    private readonly ResolvedDevice _device;
+    private readonly IDeviceController _controller;
+
+    public IRelayCommand NavigateCommand => field ??= Relay.Create<SettingsView>(Navigate);
+
+    /// <summary>Writes the config to disk now. Edits go straight into the in-memory config and are
+    /// otherwise only saved when the window closes; closing still saves as before.</summary>
+    public IRelayCommand SaveCommand => field ??= Relay.Create(Save);
+
+    /// <summary>When the config was last saved from this window; empty until then.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasSaveStatus))]
+    public partial string SaveStatusText { get; set; }
+
+    public bool HasSaveStatus => !string.IsNullOrWhiteSpace(SaveStatusText);
+
+    private void Save()
+    {
+        _controller.SaveConfig();
+        SaveStatusText = Loc.Tr("Settings_SavedAtFmt", DateTime.Now.ToString("HH:mm:ss"));
+    }
+
+    public IRelayCommand AddAppBindingCommand => field ??= Relay.Create(AddAppBinding);
+    public IRelayCommand RemoveAppBindingCommand => field ??= Relay.Create<AppBindingRow>(RemoveAppBinding, static p => p != null);
+
+    public IAsyncRelayCommand ReconnectDeviceCommand => field ??= Relay.Create(ReconnectDevice);
+    public IAsyncRelayCommand AddTouchPageCommand => field ??= Relay.Create(() => _pageManager.AddTouchButtonPage());
+    public IRelayCommand RemoveTouchPageCommand => field ??= Relay.Create<TouchButtonPage>(
+        p => _ = RemoveTouchPage(p),
+        p => p != null && _pageManager.TouchButtonPages.Count > 1);
+    public IRelayCommand MoveTouchPageUpCommand => field ??= Relay.Create<TouchButtonPage>(
+        p => MovePage(_pageManager.TouchButtonPages, p, -1),
+        p => p != null && _pageManager.TouchButtonPages.IndexOf(p) > 0);
+    public IRelayCommand MoveTouchPageDownCommand => field ??= Relay.Create<TouchButtonPage>(
+        p => MovePage(_pageManager.TouchButtonPages, p, +1),
+        p => p != null && _pageManager.TouchButtonPages.IndexOf(p) < _pageManager.TouchButtonPages.Count - 1);
+    public IRelayCommand<TouchButtonPage> EditWallpaperCommand => field ??= Relay.Create<TouchButtonPage>(p => _ = EditWallpaper(p), p => p != null);
+
+    public IRelayCommand EditPageCommandsCommand => field ??= Relay.Create<object>(
+        p => _ = EditPageCommands(p),
+        static p => p is TouchButtonPage or RotaryButtonPage);
+    public IRelayCommand AddRotaryPageCommand => field ??= Relay.Create(() => _pageManager.AddRotaryButtonPage());
+    public IRelayCommand RemoveRotaryPageCommand => field ??= Relay.Create<RotaryButtonPage>(
+        RemoveRotaryPage, p => p != null && _pageManager.RotaryButtonPages.Count > 1);
+    public IRelayCommand MoveRotaryPageUpCommand => field ??= Relay.Create<RotaryButtonPage>(
+        p => MovePage(_pageManager.RotaryButtonPages, p, -1), p => p != null && _pageManager.RotaryButtonPages.IndexOf(p) > 0);
+    public IRelayCommand MoveRotaryPageDownCommand => field ??= Relay.Create<RotaryButtonPage>(
+        p => MovePage(_pageManager.RotaryButtonPages, p, +1), p => p != null && _pageManager.RotaryButtonPages.IndexOf(p) < _pageManager.RotaryButtonPages.Count - 1);
+
+    // Side-specific rotary page management for devices with independent dial columns (Razer).
+    public IRelayCommand AddLeftRotaryPageCommand => field ??= Relay.Create(() => _pageManager.AddRotaryButtonPage(RotarySide.Left));
+    public IRelayCommand RemoveLeftRotaryPageCommand => field ??= Relay.Create<RotaryButtonPage>(p => RemoveSideRotaryPage(RotarySide.Left, p), p => p != null && LeftRotaryPages.Count > 1);
+    public IRelayCommand AddRightRotaryPageCommand => field ??= Relay.Create(() => _pageManager.AddRotaryButtonPage(RotarySide.Right));
+    public IRelayCommand RemoveRightRotaryPageCommand => field ??= Relay.Create<RotaryButtonPage>( p => RemoveSideRotaryPage(RotarySide.Right, p), p => p != null && RightRotaryPages.Count > 1);
+
+    public IRelayCommand OpenWebsiteCommand => field ??= Relay.Create(() =>
+    {
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "https://github.com/RadiatorTwo/LoupixDeck",
+                UseShellExecute = true
+            });
+        }
+        catch { }
+    });
+
+    public IAsyncRelayCommand InstallInterceptionCommand => field ??= Relay.Create(InstallInterceptionAsync);
+    public IAsyncRelayCommand UninstallInterceptionCommand => field ??= Relay.Create(UninstallInterceptionAsync);
+
+    public IAsyncRelayCommand SelectScreensaverVideoCommand => field ??= Relay.Create(SelectScreensaverVideo);
+    public IRelayCommand ClearScreensaverVideoCommand => field ??= Relay.Create(ClearScreensaverVideo);
+
+    public ObservableCollection<VibrationPatternItem> VibrationPatterns => VibrationPatternCatalog.All;
+
+    public bool IsWindows => OperatingSystem.IsWindows();
+
+    /// <summary>Gates the Linux-only Device Doctor page (issue #258).</summary>
+    public bool IsLinux => OperatingSystem.IsLinux();
+
+    /// <summary>Owns the Device Doctor run state; kept out of this class, which is large enough.</summary>
+    public LinuxDiagnosticsViewModel Diagnostics { get; }
+
+    /// <summary>Windows "run at startup" toggle. Backed directly by the HKCU Run entry
+    /// (the same one the installer manages), so it needs no config field.</summary>
+    public bool StartWithWindows
+    {
+        get => _autostart.IsEnabled();
+        set { _autostart.SetEnabled(value); OnPropertyChanged(); }
+    }
+
+    /// <summary>
+    /// App-focus page switching is available on Windows and on Linux (X11/XWayland).
+    /// Gates the "App Switching" settings page — wider than <see cref="IsWindows"/>,
+    /// so the editor stays hidden only on macOS / unsupported platforms.
+    /// </summary>
+    public bool IsAppSwitchingSupported => OperatingSystem.IsWindows() || OperatingSystem.IsLinux();
+
+    public SettingsViewModel(LoupedeckConfig config,
+        IDeviceService deviceService,
+        IPageManager pageManager,
+        IDialogService dialogService,
+        IPluginManager pluginManager,
+        IInterceptionService interceptionService,
+        IAutostartService autostart,
+        IWorkspaceActivationService activation,
+        IProfilePackageService packageService,
+        IScreensaverProviderRegistry screensaverRegistry,
+        IExclusiveModeService exclusiveMode,
+        IProfileEditingService profileEditing,
+        IUpdateService updateService,
+        ICompanionCoordinator companions,
+        ICompanionContextSync contextSync,
+        IDeviceController controller,
+        ResolvedDevice device,
+        LinuxDiagnosticsViewModel diagnostics)
+    {
+        _companions = companions;
+        Diagnostics = diagnostics;
+        _contextSync = contextSync;
+        _device = device;
+        _controller = controller;
+        Config = config;
+        IsVibrationSupported = config?.Geometry.HasVibration ?? true;
+        _deviceService = deviceService;
+        _pageManager = pageManager;
+        _dialogService = dialogService;
+        _interceptionService = interceptionService;
+        _pluginManager = pluginManager;
+        _autostart = autostart;
+        _activation = activation;
+        _packageService = packageService;
+        _screensaverRegistry = screensaverRegistry;
+        _exclusiveMode = exclusiveMode;
+        _profileEditing = profileEditing;
+        _updateService = updateService;
+
+        // The alignment pattern lives on the device, not in this window, so closing the
+        // window has to take it down — including via the title-bar X, which completes the
+        // same DialogResult as the buttons do.
+        _ = DialogResult.Task.ContinueWith(_ => StopAlignmentPreview(),
+            TaskScheduler.Default);
+
+        // The companion editor listens to the root-level coordinator; unhook it with the window.
+        _ = DialogResult.Task.ContinueWith(_ => _companionGroups?.Dispose(),
+            TaskScheduler.Default);
+
+        // A companion's profiles follow its master and are read-only here. Joining or leaving a group,
+        // or the master changing its profiles, rewrites them while the window is open.
+        _companions.GroupsChanged += OnCompanionGroupsChanged;
+        _companions.DeviceOnlineStateChanged += OnCompanionOnlineStateChanged;
+        _contextSync.LinkedStructureChanged += OnLinkedStructureChanged;
+        _ = DialogResult.Task.ContinueWith(_ =>
+        {
+            _companions.GroupsChanged -= OnCompanionGroupsChanged;
+            _companions.DeviceOnlineStateChanged -= OnCompanionOnlineStateChanged;
+            _contextSync.LinkedStructureChanged -= OnLinkedStructureChanged;
+        }, TaskScheduler.Default);
+
+        // Commands are created lazily on first access by their `field ??= Relay.Create(...)`
+        // getters, so there is nothing to wire up here.
+
+        // The page-editor collections forward to the active workspace (issue #132), so their
+        // instances change when a different workspace is activated. Bind through a rebindable
+        // helper and re-target on ActiveWorkspaceChanged so the Pages editor follows the active
+        // workspace. CollectionChanged can fire from a background thread (the parameterless
+        // RelayCommand runs Execute via Task.Run), so the handlers marshal to the UI thread.
+        BindPageCollections();
+
+        // Build the Profiles tree editor rows from the config.
+        BuildProfileRows();
+
+        _activation.ActiveProfileChanged += _ => OnActiveWorkspaceChangedForEditor();
+        _activation.ActiveWorkspaceChanged += _ => OnActiveWorkspaceChangedForEditor();
+
+        SyncRotaryPageOptions();
+        SyncFallbackPageOptions();
+
+        // Build the editor rows from the persisted rules. Rows and
+        // Config.AppPageBindings are kept in sync manually in Add/RemoveAppBinding
+        // (the only mutation paths), so no event subscription is needed here.
+        foreach (var binding in Config.AppPageBindings)
+            AppBindingRows.Add(new AppBindingRow(binding, TouchPages, RotaryPageOptions));
+
+        // Context rules (issue #132). By the time settings can be opened the context engine has
+        // folded any legacy AppPageBindings into Config.ContextRules, so this shows both migrated
+        // and user-created rules.
+        foreach (var rule in Config.ContextRules)
+            ContextRuleRows.Add(new ContextRuleRow(rule, Config.Profiles, _companions, _device.ScopeKey));
+
+        Config.HapticSteps.CollectionChanged += OnHapticStepsChanged;
+
+        CurrentView = SettingsView.General;
+
+        // Device info call blocks on a serial round-trip — push it off the UI thread.
+        _ = Task.Run(RefreshDeviceInfoAsync);
+
+        // Probe the Interception driver state (DLL API) off the UI thread; drives the page.
+        if (IsWindows)
+            _ = Task.Run(RefreshInterceptionStatus);
+
+        // Probe ffmpeg availability off the UI thread (the first probe can block briefly);
+        // drives the screensaver "ffmpeg missing" hint.
+        _ = Task.Run(() =>
+        {
+            var available = FfmpegDetector.IsAvailable();
+            Dispatcher.UIThread.Post(() => FfmpegAvailable = available);
+        });
+
+        Version = $"v{System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "?"}";
+
+        SelectedLanguage = LocalizationManager.AvailableLanguages
+            .FirstOrDefault(language => language.Code == LocalizationManager.Instance.CurrentLanguage);
+    }
+
+    // ───────── General / Language ─────────
+
+    /// <summary>The UI languages the app ships, in menu order.</summary>
+    public IReadOnlyList<LanguageOption> Languages => LocalizationManager.AvailableLanguages;
+
+    /// <summary>
+    /// The selected UI language. This is a global preference, not a per-device setting, so it is
+    /// applied and persisted by the localization manager rather than stored in the device config.
+    /// </summary>
+    [ObservableProperty]
+    public partial LanguageOption SelectedLanguage { get; set; }
+
+    partial void OnSelectedLanguageChanged(LanguageOption value)
+    {
+        if (value == null || value.Code == LocalizationManager.Instance.CurrentLanguage)
+        {
+            return;
+        }
+
+        LocalizationManager.Instance.SetLanguage(value.Code);
+        LocalizationManager.Instance.Persist();
+    }
+
+    // ───────── General / Updates ─────────
+
+    /// <summary>
+    /// Whether the app looks for a new release after startup. Global like the language, so it is kept
+    /// by the update service in ui-settings.json rather than in the device config.
+    /// </summary>
+    public bool CheckForUpdates
+    {
+        get => _updateService?.AutoCheckEnabled ?? true;
+        set
+        {
+            if (_updateService == null || value == _updateService.AutoCheckEnabled)
+            {
+                return;
+            }
+
+            _updateService.AutoCheckEnabled = value;
+            OnPropertyChanged();
+        }
+    }
+
+    // ───────── General / Device ─────────
+
+    public string DeviceName => _deviceService?.Device?.Type ?? "Device";
+
+    [ObservableProperty]
+    public partial string DeviceVersion { get; private set; } = "—";
+    [ObservableProperty]
+    public partial string DeviceSerial { get; private set; } = "—";
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(DeviceStatusText))]
+    public partial bool DeviceConnected { get; private set; }
+
+    public string DeviceStatusText => Loc.Tr(DeviceConnected ? "Settings_Connected" : "Settings_Disconnected");
+
+    private async Task RefreshDeviceInfoAsync()
+    {
+        var dev = _deviceService?.Device;
+        if (dev == null)
+        {
+            Dispatcher.UIThread.Post(() =>
+            {
+                DeviceConnected = false;
+                DeviceVersion = "—";
+                DeviceSerial = "—";
+            });
+            return;
+        }
+
+        string version = "—";
+        string serialHex = "—";
+        var ok = false;
+        try
+        {
+            // Blocks on serial round-trip (GetInfo does Send().GetAwaiter().GetResult()).
+            // We are already off the UI thread because the caller used Task.Run.
+            var (serial, ver) = dev.GetInfo();
+            version = ver ?? "—";
+            serialHex = serial != null ? Convert.ToHexString(serial) : "—";
+            ok = true;
+        }
+        catch
+        {
+            // fall through with defaults
+        }
+
+        Dispatcher.UIThread.Post(() =>
+        {
+            DeviceVersion = version;
+            DeviceSerial = serialHex;
+            DeviceConnected = ok;
+        });
+
+        await Task.CompletedTask;
+    }
+
+    private async Task ReconnectDevice()
+    {
+        await Task.Run(() =>
+        {
+            try { _deviceService?.ReconnectDevice(); }
+            catch { /* ignored */ }
+        });
+        await Task.Delay(500);
+        await Task.Run(RefreshDeviceInfoAsync);
+    }
+
+    // ───────── Interception (Windows only) ─────────
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(InterceptionStatusText))]
+    public partial bool InterceptionDriverInstalled { get; private set; }
+
+    public string InterceptionStatusText => Loc.Tr(InterceptionDriverInstalled ? "Settings_Installed" : "Settings_NotInstalled");
+
+    [ObservableProperty]
+    public partial bool InterceptionBusy { get; private set; }
+    [ObservableProperty]
+    public partial string InterceptionStatusMessage { get; private set; } = string.Empty;
+
+    /// <summary>
+    /// The Use-Interception toggle. Maps the tri-state config (null = auto) onto a plain bool:
+    /// auto is shown as enabled, so an installed driver is used by default.
+    /// </summary>
+    public bool InterceptionEnabled
+    {
+        get => Config.InterceptionEnabled ?? true;
+        set
+        {
+            if ((Config.InterceptionEnabled ?? true) == value) return;
+            Config.InterceptionEnabled = value;
+            OnPropertyChanged();
+        }
+    }
+
+    private void RefreshInterceptionStatus()
+    {
+        var installed = _interceptionService.IsDriverInstalled();
+        Dispatcher.UIThread.Post(() => InterceptionDriverInstalled = installed);
+    }
+
+    private async Task InstallInterceptionAsync()
+    {
+        InterceptionBusy = true;
+        try
+        {
+            var progress = new Progress<string>(msg =>
+                Dispatcher.UIThread.Post(() => InterceptionStatusMessage = msg));
+            await _interceptionService.DownloadAndInstallAsync(progress);
+        }
+        finally
+        {
+            InterceptionBusy = false;
+            await Task.Run(RefreshInterceptionStatus);
+        }
+    }
+
+    private async Task UninstallInterceptionAsync()
+    {
+        InterceptionBusy = true;
+        try
+        {
+            var progress = new Progress<string>(msg =>
+                Dispatcher.UIThread.Post(() => InterceptionStatusMessage = msg));
+            await _interceptionService.UninstallAsync(progress);
+        }
+        finally
+        {
+            InterceptionBusy = false;
+            await Task.Run(RefreshInterceptionStatus);
+        }
+    }
+
+    // ───────── Pages ─────────
+
+    public ObservableCollection<TouchButtonPage> TouchPages => _pageManager.TouchButtonPages;
+
+    /// <summary>Companion group editor (global groups, same from every device).</summary>
+    public CompanionGroupsViewModel CompanionGroups => _companionGroups ??= new CompanionGroupsViewModel(_companions);
+
+    private CompanionGroupsViewModel _companionGroups;
+
+    public ObservableCollection<RotaryButtonPage> RotaryPages => _pageManager.RotaryButtonPages;
+
+    /// <summary>True for devices that page their two dial columns independently (Razer):
+    /// the rotary settings show separate left/right page lists instead of one.</summary>
+    public bool HasIndependentRotarySides => _pageManager.HasIndependentRotarySides;
+    public ObservableCollection<RotaryButtonPage> LeftRotaryPages => _pageManager.GetRotaryPages(RotarySide.Left);
+    public ObservableCollection<RotaryButtonPage> RightRotaryPages => _pageManager.GetRotaryPages(RotarySide.Right);
+
+    public ObservableCollection<int> TouchPageIndices
+    {
+        get
+        {
+            var c = new ObservableCollection<int>();
+            if (TouchPages != null)
+                for (var i = 0; i < TouchPages.Count; i++) c.Add(i);
+            return c;
+        }
+    }
+
+    // Page-editor collections forward to the active workspace, so their instances change on a
+    // workspace switch. Track what we are subscribed to so we can rebind (issue #132).
+    private ObservableCollection<TouchButtonPage> _boundTouchPages;
+    private ObservableCollection<RotaryButtonPage> _boundRotaryPages;
+    private ObservableCollection<RotaryButtonPage> _boundLeftRotaryPages;
+    private ObservableCollection<RotaryButtonPage> _boundRightRotaryPages;
+
+    private void BindPageCollections()
+    {
+        Rebind(ref _boundTouchPages, _pageManager.TouchButtonPages, OnTouchPagesChanged);
+        Rebind(ref _boundRotaryPages, _pageManager.RotaryButtonPages, OnRotaryPagesChangedHandler);
+
+        if (HasIndependentRotarySides)
+        {
+            Rebind(ref _boundLeftRotaryPages, _pageManager.GetRotaryPages(RotarySide.Left), OnLeftRotaryPagesChanged);
+            Rebind(ref _boundRightRotaryPages, _pageManager.GetRotaryPages(RotarySide.Right), OnRightRotaryPagesChanged);
+        }
+    }
+
+    private static void Rebind(ref ObservableCollection<RotaryButtonPage> bound,
+        ObservableCollection<RotaryButtonPage> next,
+        System.Collections.Specialized.NotifyCollectionChangedEventHandler handler)
+    {
+        if (bound != null) bound.CollectionChanged -= handler;
+        bound = next;
+        if (bound != null) bound.CollectionChanged += handler;
+    }
+
+    private static void Rebind(ref ObservableCollection<TouchButtonPage> bound,
+        ObservableCollection<TouchButtonPage> next,
+        System.Collections.Specialized.NotifyCollectionChangedEventHandler handler)
+    {
+        if (bound != null) bound.CollectionChanged -= handler;
+        bound = next;
+        if (bound != null) bound.CollectionChanged += handler;
+    }
+
+    private void OnTouchPagesChanged(object sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e) =>
+        Dispatcher.UIThread.Post(() =>
+        {
+            RefreshTouchPageCommands();
+            SyncFallbackPageOptions();
+        });
+
+    private void OnRotaryPagesChangedHandler(object sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e) =>
+        Dispatcher.UIThread.Post(() =>
+        {
+            RefreshRotaryPageCommands();
+            SyncRotaryPageOptions();
+        });
+
+    private void OnLeftRotaryPagesChanged(object sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e) =>
+        Dispatcher.UIThread.Post(RemoveLeftRotaryPageCommand.NotifyCanExecuteChanged);
+
+    private void OnRightRotaryPagesChanged(object sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e) =>
+        Dispatcher.UIThread.Post(RemoveRightRotaryPageCommand.NotifyCanExecuteChanged);
+
+    /// <summary>Re-targets the Pages editor onto the newly active workspace's collections and
+    /// refreshes the Profiles tree badges (issue #132).</summary>
+    private void OnActiveWorkspaceChangedForEditor() =>
+        Dispatcher.UIThread.Post(() =>
+        {
+            BindPageCollections();
+            OnPropertyChanged(nameof(TouchPages));
+            OnPropertyChanged(nameof(RotaryPages));
+            OnPropertyChanged(nameof(LeftRotaryPages));
+            OnPropertyChanged(nameof(RightRotaryPages));
+            OnPropertyChanged(nameof(TouchPageIndices));
+            RefreshTouchPageCommands();
+            RefreshRotaryPageCommands();
+            SyncRotaryPageOptions();
+            SyncFallbackPageOptions();
+            foreach (var row in ProfileRows) row.RefreshFlags();
+        });
+
+    // ───────── Profiles / Workspaces (issue #132) ─────────
+
+    /// <summary>Editor rows for the Profiles settings tree, kept in sync with
+    /// <c>Config.Profiles</c> in the Add/Remove commands (the only mutation paths).</summary>
+    public ObservableCollection<ProfileRow> ProfileRows { get; } = new();
+
+    /// <summary>(Re)builds the tree rows from <c>Config.Profiles</c>. Used at construction and
+    /// after an import, which writes into the profile collection from outside this editor.</summary>
+    private void BuildProfileRows()
+    {
+        ProfileRows.Clear();
+
+        foreach (Profile profile in Config.Profiles)
+            ProfileRows.Add(new ProfileRow(profile, this));
+    }
+
+    public IRelayCommand AddProfileCommand => field ??= Relay.Create(AddProfile, () => CanEditProfiles);
+    public IAsyncRelayCommand RemoveProfileCommand => field ??= Relay.Create<ProfileRow>(
+        RemoveProfile, p => p != null && CanEditProfiles && Config.Profiles.Count > 1);
+    public IRelayCommand SetStartupProfileCommand => field ??= Relay.Create<ProfileRow>(SetStartupProfile, p => p != null && CanEditProfiles);
+    public IAsyncRelayCommand ActivateProfileCommand => field ??= Relay.Create<ProfileRow>(
+        p => _activation.ActivateProfile(p.Profile.Id), p => p != null && CanEditProfiles);
+
+    public IRelayCommand AddWorkspaceCommand => field ??= Relay.Create<ProfileRow>(AddWorkspace, p => p != null && CanEditProfiles);
+    public IAsyncRelayCommand RemoveWorkspaceCommand => field ??= Relay.Create<WorkspaceRow>(
+        RemoveWorkspace, p => p != null && CanEditProfiles && p.Parent.Profile.Workspaces.Count > 1);
+    public IRelayCommand SetHomeWorkspaceCommand => field ??= Relay.Create<WorkspaceRow>(SetHomeWorkspace, p => p != null && CanEditProfiles);
+    public IAsyncRelayCommand ActivateWorkspaceCommand => field ??= Relay.Create<WorkspaceRow>(ActivateWorkspace, p => p != null && CanEditProfiles);
+
+    // ───────── Companion (profiles follow the master) ─────────
+
+    /// <summary>True while this device is a companion: its profiles and workspaces mirror its
+    /// master's, so they cannot be added, removed, renamed or switched here. Pages stay editable.</summary>
+    public bool IsCompanion => _companions.IsCompanion(_device.ScopeKey);
+
+    public bool CanEditProfiles => !IsCompanion;
+
+    /// <summary>Explains on a companion who owns its profiles, workspaces and profile rules, and that it
+    /// stays where it is while that master is offline.</summary>
+    public string CompanionProfilesHint => CompanionStatusText.MasterName(_companions, _device.ScopeKey) is { } master
+        ? Loc.Tr(_companions.IsPaused(_device.ScopeKey)
+            ? "Settings_ProfilesFollowPausedMasterFmt"
+            : CompanionStatusText.IsMasterOffline(_companions, _device.ScopeKey)
+                ? "Settings_ProfilesFollowOfflineMasterFmt"
+                : "Settings_ProfilesFollowMasterFmt", master)
+        : string.Empty;
+
+    private void OnCompanionGroupsChanged() => Dispatcher.UIThread.Post(RefreshCompanionState);
+
+    private void OnLinkedStructureChanged(string deviceKey)
+    {
+        if (string.Equals(deviceKey, _device.ScopeKey, StringComparison.OrdinalIgnoreCase))
+            Dispatcher.UIThread.Post(RefreshCompanionState);
+        else if (_companions.IsCompanionOf(_device.ScopeKey, deviceKey))
+            Dispatcher.UIThread.Post(RefreshRuleCompanionTargets);
+    }
+
+    // A master's profile rules show its companions as connected or offline.
+    private void OnCompanionOnlineStateChanged(string deviceKey)
+    {
+        if (_companions.IsCompanionOf(_device.ScopeKey, deviceKey))
+            Dispatcher.UIThread.Post(RefreshRuleCompanionTargets);
+        else if (string.Equals(_companions.GetMasterKey(_device.ScopeKey), deviceKey, StringComparison.OrdinalIgnoreCase))
+            Dispatcher.UIThread.Post(() => OnPropertyChanged(nameof(CompanionProfilesHint)));
+    }
+
+    private void RefreshRuleCompanionTargets()
+    {
+        foreach (ContextRuleRow row in ContextRuleRows)
+            row.RefreshCompanionTargets();
+    }
+
+    private void RefreshCompanionState()
+    {
+        OnPropertyChanged(nameof(IsCompanion));
+        OnPropertyChanged(nameof(CanEditProfiles));
+        OnPropertyChanged(nameof(CompanionProfilesHint));
+
+        BuildProfileRows();
+        RefreshRuleCompanionTargets();
+
+        AddProfileCommand.NotifyCanExecuteChanged();
+        RemoveProfileCommand.NotifyCanExecuteChanged();
+        SetStartupProfileCommand.NotifyCanExecuteChanged();
+        ActivateProfileCommand.NotifyCanExecuteChanged();
+        AddWorkspaceCommand.NotifyCanExecuteChanged();
+        RemoveWorkspaceCommand.NotifyCanExecuteChanged();
+        SetHomeWorkspaceCommand.NotifyCanExecuteChanged();
+        ActivateWorkspaceCommand.NotifyCanExecuteChanged();
+        ImportPackageCommand.NotifyCanExecuteChanged();
+        ImportLoupedeckCommand.NotifyCanExecuteChanged();
+    }
+
+    // ───────── Portable profile packages (issue #133) ─────────
+
+    /// <summary>Result of the last export/import, shown under the Profiles pane header.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasPackageStatus))]
+    public partial string PackageStatusMessage { get; set; } = string.Empty;
+
+    public bool HasPackageStatus => !string.IsNullOrWhiteSpace(PackageStatusMessage);
+
+    public IAsyncRelayCommand ExportProfileCommand => field ??= Relay.Create<ProfileRow>(
+        row => ExportPackage(ProfileExportRequest.ForProfile(row.Profile)),
+        static row => row != null);
+
+    public IAsyncRelayCommand ExportWorkspaceCommand => field ??= Relay.Create<WorkspaceRow>(
+        row => ExportPackage(ProfileExportRequest.ForWorkspace(row.Workspace)),
+        static row => row != null);
+
+    public IAsyncRelayCommand ExportTouchPageCommand => field ??= Relay.Create<TouchButtonPage>(
+        page => ExportPackage(ProfileExportRequest.ForTouchPage(page)),
+        static page => page != null);
+
+    public IAsyncRelayCommand ExportRotaryPageCommand => field ??= Relay.Create<RotaryButtonPage>(
+        page => ExportPackage(ProfileExportRequest.ForRotaryPage(page)),
+        static page => page != null);
+
+    public IAsyncRelayCommand ImportPackageCommand => field ??= Relay.Create(ImportPackage, () => CanEditProfiles);
+
+    private async Task ExportPackage(ProfileExportRequest request) =>
+        ReportPackageResult(await ProfileExportViewModel.ShowAsync(_dialogService, request));
+
+    private async Task ImportPackage()
+    {
+        ProfilePackageResult result = await ProfileImportViewModel.ShowAsync(_dialogService);
+        if (result == null)
+            return;
+
+        ReportPackageResult(result);
+
+        // The import writes straight into Config.Profiles, so the tree editor has to be rebuilt.
+        if (result.Success)
+            BuildProfileRows();
+    }
+
+    public IAsyncRelayCommand ImportLoupedeckCommand => field ??= Relay.Create(ImportLoupedeck, () => CanEditProfiles);
+
+    private async Task ImportLoupedeck()
+    {
+        string message = await LoupedeckImportViewModel.ShowAsync(_dialogService);
+        if (message == null)
+            return;
+
+        PackageStatusMessage = message;
+        BuildProfileRows();
+    }
+
+    private void ReportPackageResult(ProfilePackageResult result)
+    {
+        if (result == null) return;
+
+        List<string> parts = [result.Message];
+        parts.AddRange(result.Warnings);
+        PackageStatusMessage = string.Join(Environment.NewLine, parts);
+    }
+
+    private void AddProfile()
+    {
+        Profile profile = _profileEditing.AddProfile("New Profile");
+        ProfileRows.Add(new ProfileRow(profile, this));
+        RemoveProfileCommand.NotifyCanExecuteChanged();
+    }
+
+    private async Task RemoveProfile(ProfileRow row)
+    {
+        if (row == null) return;
+
+        bool wasActive = Config.ActiveProfileId == row.Profile.Id;
+
+        // The row goes before the activation event is handled: that handler is posted to the UI
+        // thread and walks ProfileRows, so it must not see the removed row.
+        if (!_profileEditing.CanRemoveProfile(row.Profile)) return;
+
+        // Removing is immediate here; only ask when companions would lose their own pages with it.
+        if (!await ConfirmCompanionLosses("Confirm_DeleteProfileTitle",
+                Loc.Tr("Confirm_DeleteProfileMessage", row.Profile.Name),
+                CompanionImpact.ForProfile(_companions, _device.ScopeKey, row.Profile.Id)))
+            return;
+        ProfileRows.Remove(row);
+        await _profileEditing.RemoveProfile(row.Profile);
+
+        // Activating a surviving profile re-targets the editor and refreshes the badges itself.
+        if (!wasActive)
+            foreach (ProfileRow r in ProfileRows) r.RefreshFlags();
+
+        RemoveProfileCommand.NotifyCanExecuteChanged();
+    }
+
+    /// <summary>True without asking when no companion loses pages; otherwise asks, naming them.</summary>
+    private async Task<bool> ConfirmCompanionLosses(string titleKey, string message, IReadOnlyList<CompanionLossEntry> losses)
+    {
+        if (losses.Count == 0) return true;
+
+        string full = message + Environment.NewLine + Environment.NewLine + Loc.Tr("Confirm_CompanionPagesLost") +
+                      Environment.NewLine + CompanionImpact.Describe(losses);
+        DialogResult result = await _dialogService.ShowDialogAsync<ConfirmDialogViewModel, DialogResult>(vm =>
+            vm.Configure(full, title: Loc.Tr(titleKey), confirmText: Loc.Tr("Confirm_Delete"),
+                cancelText: Loc.Tr("Confirm_Cancel")));
+        return result?.IsConfirmed == true;
+    }
+
+    private void SetStartupProfile(ProfileRow row)
+    {
+        if (row == null) return;
+        Config.StartupProfileId = row.Profile.Id;
+        foreach (var r in ProfileRows) r.RefreshFlags();
+    }
+
+    private void AddWorkspace(ProfileRow row)
+    {
+        if (row == null) return;
+        Workspace workspace = _profileEditing.AddWorkspace(row.Profile, "New Workspace");
+        row.Workspaces.Add(new WorkspaceRow(workspace, row));
+        RemoveWorkspaceCommand.NotifyCanExecuteChanged();
+    }
+
+    private async Task RemoveWorkspace(WorkspaceRow row)
+    {
+        if (row == null) return;
+        if (!_profileEditing.CanRemoveWorkspace(row.Parent.Profile, row.Workspace)) return;
+
+        if (!await ConfirmCompanionLosses("Confirm_DeleteWorkspaceTitle",
+                Loc.Tr("Confirm_DeleteWorkspaceMessage", row.Workspace.Name),
+                CompanionImpact.ForWorkspace(_companions, _device.ScopeKey, row.Workspace.Id)))
+            return;
+
+        row.Parent.Workspaces.Remove(row);
+        await _profileEditing.RemoveWorkspace(row.Parent.Profile, row.Workspace);
+
+        row.Parent.RefreshFlags();
+        RemoveWorkspaceCommand.NotifyCanExecuteChanged();
+    }
+
+    private void SetHomeWorkspace(WorkspaceRow row)
+    {
+        if (row == null) return;
+        row.Parent.Profile.HomeWorkspaceId = row.Workspace.Id;
+        row.Parent.RefreshFlags();
+    }
+
+    private async Task ActivateWorkspace(WorkspaceRow row)
+    {
+        if (row == null) return;
+
+        // Activate the owning profile first (opens its home), then the specific workspace.
+        if (Config.ActiveProfileId != row.Parent.Profile.Id)
+            await _activation.ActivateProfile(row.Parent.Profile.Id);
+
+        await _activation.ActivateWorkspace(row.Workspace.Id);
+    }
+
+    // ───────── App Switching ─────────
+
+    // The rule editor's touch-page selector binds directly to the live TouchPages
+    // collection (a stable instance). A regenerated list would make the ComboBox
+    // reset its SelectedIndex and — via the TwoWay binding — write that reset back
+    // over the user's choice, so the selection appeared to "not save".
+
+    /// <summary>Rotary page labels with a leading "(unchanged)" entry — maps to
+    /// <c>AppPageBinding.RotarySelectionIndex</c> (0 = unchanged, n = page n). Kept
+    /// as a single stable instance and synced in place (tail add/remove) so bound
+    /// ComboBoxes never lose their selection.</summary>
+    public ObservableCollection<string> RotaryPageOptions { get; } = new();
+
+    /// <summary>Editor rows bound by the rule list. Kept in sync with
+    /// <c>Config.AppPageBindings</c> in <see cref="AddAppBinding"/> /
+    /// <see cref="RemoveAppBinding"/>.</summary>
+    public ObservableCollection<AppBindingRow> AppBindingRows { get; } = new();
+    public ObservableCollection<string> FallbackPageOptions { get; } = new();
+
+    private void SyncFallbackPageOptions()
+    {
+        if (FallbackPageOptions.Count == 0) FallbackPageOptions.Add("(do nothing)");
+        var want = (TouchPages?.Count ?? 0) + 1; // +1 for the "(do nothing)" entry
+        while (FallbackPageOptions.Count > want) FallbackPageOptions.RemoveAt(FallbackPageOptions.Count - 1);
+        while (FallbackPageOptions.Count < want) FallbackPageOptions.Add($"Page {FallbackPageOptions.Count}");
+    }
+
+    /// <summary>ComboBox helper for the no-match fallback: 0 = "(do nothing)" (null),
+    /// n = touch page n-1. Maps to/from <c>Config.AppSwitchingFallbackTouchPageIndex</c>.</summary>
+    public int FallbackSelectionIndex
+    {
+        get => Config.AppSwitchingFallbackTouchPageIndex is { } idx ? idx + 1 : 0;
+        set
+        {
+            var newValue = value <= 0 ? (int?)null : value - 1;
+            if (Config.AppSwitchingFallbackTouchPageIndex == newValue) return;
+            Config.AppSwitchingFallbackTouchPageIndex = newValue;
+            OnPropertyChanged();
+        }
+    }
+
+    private void SyncRotaryPageOptions()
+    {
+        if (RotaryPageOptions.Count == 0) RotaryPageOptions.Add("(unchanged)");
+        var want = (RotaryPages?.Count ?? 0) + 1; // +1 for the "(unchanged)" entry
+        while (RotaryPageOptions.Count > want) RotaryPageOptions.RemoveAt(RotaryPageOptions.Count - 1);
+        while (RotaryPageOptions.Count < want) RotaryPageOptions.Add($"Page {RotaryPageOptions.Count}");
+    }
+
+    private void AddAppBinding()
+    {
+        var binding = new AppPageBinding();
+        Config.AppPageBindings.Add(binding);
+        AppBindingRows.Add(new AppBindingRow(binding, TouchPages, RotaryPageOptions));
+    }
+
+    private void RemoveAppBinding(AppBindingRow row)
+    {
+        if (row == null) return;
+        Config.AppPageBindings.Remove(row.Binding);
+        AppBindingRows.Remove(row);
+    }
+
+    // ───────── Context rules (issue #132) ─────────
+
+    /// <summary>Profiles for the rule/fallback ComboBoxes.</summary>
+    public ObservableCollection<Profile> RuleProfiles => Config.Profiles;
+
+    /// <summary>Editor rows for the context-rule list, kept in sync with <c>Config.ContextRules</c>.</summary>
+    public ObservableCollection<ContextRuleRow> ContextRuleRows { get; } = new();
+
+    public IRelayCommand AddContextRuleCommand => field ??= Relay.Create(AddContextRule);
+    public IRelayCommand RemoveContextRuleCommand => field ??= Relay.Create<ContextRuleRow>(RemoveContextRule, p => p != null);
+
+    private void AddContextRule()
+    {
+        var rule = new ContextRule();
+        Config.ContextRules.Add(rule);
+        ContextRuleRows.Add(new ContextRuleRow(rule, Config.Profiles, _companions, _device.ScopeKey));
+    }
+
+    private void RemoveContextRule(ContextRuleRow row)
+    {
+        if (row == null) return;
+        Config.ContextRules.Remove(row.Rule);
+        ContextRuleRows.Remove(row);
+    }
+
+    /// <summary>The three no-match behaviours, in the order they are offered.</summary>
+    public IReadOnlyList<NoMatchBehaviorOption> NoMatchBehaviorOptions { get; } =
+    [
+        new(NoMatchProfileBehavior.KeepCurrent, "Rule_KeepCurrentProfile"),
+        new(NoMatchProfileBehavior.RestorePrevious, "Rule_RestorePreviousProfile"),
+        new(NoMatchProfileBehavior.FixedProfile, "Rule_FixedFallbackProfile")
+    ];
+
+    /// <summary>What happens to the active profile when no rule matches any more.</summary>
+    public NoMatchBehaviorOption SelectedNoMatchBehavior
+    {
+        get
+        {
+            var current = Config.EffectiveNoMatchBehavior;
+            return NoMatchBehaviorOptions.FirstOrDefault(o => o.Value == current)
+                   ?? NoMatchBehaviorOptions[0];
+        }
+        set
+        {
+            Config.NoMatchBehavior = value?.Value ?? NoMatchProfileBehavior.KeepCurrent;
+
+            // Give the fixed mode a usable profile right away instead of an empty ComboBox.
+            if (Config.NoMatchBehavior == NoMatchProfileBehavior.FixedProfile)
+                Config.FallbackProfileId ??= Config.Profiles.FirstOrDefault()?.Id;
+
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(UseFixedFallbackProfile));
+            OnPropertyChanged(nameof(FallbackProfile));
+        }
+    }
+
+    /// <summary>True while the fixed-profile mode is selected; enables the fallback-profile picker.</summary>
+    public bool UseFixedFallbackProfile => Config.EffectiveNoMatchBehavior == NoMatchProfileBehavior.FixedProfile;
+
+    public Profile FallbackProfile
+    {
+        get => Config.Profiles.FirstOrDefault(p => p.Id == Config.FallbackProfileId);
+        set
+        {
+            Config.FallbackProfileId = value?.Id;
+            OnPropertyChanged();
+        }
+    }
+
+    private async Task RemoveTouchPage(TouchButtonPage page)
+    {
+        if (page == null || TouchPages.Count <= 1) return;
+        var idx = TouchPages.IndexOf(page);
+        if (idx < 0) return;
+        _pageManager.CurrentTouchPageIndex = idx;
+        await _pageManager.DeleteTouchButtonPage();
+    }
+
+    private void RemoveRotaryPage(RotaryButtonPage page)
+    {
+        if (page == null || RotaryPages.Count <= 1) return;
+        var idx = RotaryPages.IndexOf(page);
+        if (idx < 0) return;
+        _pageManager.CurrentRotaryPageIndex = idx;
+        _pageManager.DeleteRotaryButtonPage();
+    }
+
+    private void RemoveSideRotaryPage(RotarySide side, RotaryButtonPage page)
+    {
+        var pages = _pageManager.GetRotaryPages(side);
+        if (page == null || pages.Count <= 1) return;
+        var idx = pages.IndexOf(page);
+        if (idx < 0) return;
+        // Point the side's current index at the page to delete, then delete it.
+        _pageManager.ApplyRotaryPage(side, idx);
+        _pageManager.DeleteRotaryButtonPage(side);
+    }
+
+    private void MovePage<T>(ObservableCollection<T> coll, T page, int delta)
+    {
+        if (page == null) return;
+        var idx = coll.IndexOf(page);
+        var target = idx + delta;
+        if (idx < 0 || target < 0 || target >= coll.Count) return;
+        coll.Move(idx, target);
+
+        // Renumber pages so PageName reflects the new order.
+        var counter = 0;
+        foreach (var item in coll)
+        {
+            counter++;
+            switch (item)
+            {
+                case TouchButtonPage tp: tp.Page = counter; break;
+                case RotaryButtonPage rp: rp.Page = counter; break;
+            }
+        }
+
+        // Keep the current-page index pointing at the same page after the move.
+        if (typeof(T) == typeof(TouchButtonPage))
+        {
+            _pageManager.CurrentTouchPageIndex = AdjustCurrentIndex(
+                _pageManager.CurrentTouchPageIndex, idx, target);
+        }
+        else if (typeof(T) == typeof(RotaryButtonPage))
+        {
+            _pageManager.CurrentRotaryPageIndex = AdjustCurrentIndex(
+                _pageManager.CurrentRotaryPageIndex, idx, target);
+        }
+    }
+
+    private static int AdjustCurrentIndex(int current, int from, int to)
+    {
+        if (current == from) return to;
+        if (from < current && to >= current) return current - 1;
+        if (from > current && to <= current) return current + 1;
+        return current;
+    }
+
+    private void RefreshTouchPageCommands()
+    {
+        MoveTouchPageUpCommand?.NotifyCanExecuteChanged();
+        MoveTouchPageDownCommand?.NotifyCanExecuteChanged();
+        RemoveTouchPageCommand?.NotifyCanExecuteChanged();
+    }
+
+    private void RefreshRotaryPageCommands()
+    {
+        MoveRotaryPageUpCommand?.NotifyCanExecuteChanged();
+        MoveRotaryPageDownCommand?.NotifyCanExecuteChanged();
+        RemoveRotaryPageCommand?.NotifyCanExecuteChanged();
+    }
+
+    // ───────── Screensaver ─────────
+
+    /// <summary>Whether ffmpeg was found on PATH. Defaults to true (assume present) and is
+    /// corrected by the async probe, so the "missing" hint only shows once we're sure.</summary>
+    private bool _ffmpegAvailable = true;
+    public bool FfmpegAvailable
+    {
+        get => _ffmpegAvailable;
+        private set
+        {
+            if (SetProperty(ref _ffmpegAvailable, value))
+            {
+                OnPropertyChanged(nameof(FfmpegMissing));
+                OnPropertyChanged(nameof(ShowFfmpegHint));
+            }
+        }
+    }
+
+    /// <summary>Inverse of <see cref="FfmpegAvailable"/> for the settings hint visibility.</summary>
+    public bool FfmpegMissing => !FfmpegAvailable;
+
+    /// <summary>The ffmpeg hint only matters for the video source — a plugin screensaver renders
+    /// its own frames and needs no external decoder (issue #124).</summary>
+    public bool ShowFfmpegHint => FfmpegMissing && IsVideoScreensaver;
+
+    /// <summary>The selectable screensaver sources, in display order.</summary>
+    public IReadOnlyList<ScreensaverSourceKind> ScreensaverSourceOptions { get; } =
+        [ScreensaverSourceKind.Video, ScreensaverSourceKind.Plugin];
+
+    /// <summary>Which source drives the screensaver. Writing it also re-evaluates the derived
+    /// visibility flags so the video and plugin rows swap immediately.</summary>
+    public ScreensaverSourceKind SelectedScreensaverSource
+    {
+        get => Config.ScreensaverSource;
+        set
+        {
+            if (Config.ScreensaverSource == value)
+                return;
+
+            Config.ScreensaverSource = value;
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(IsVideoScreensaver));
+            OnPropertyChanged(nameof(IsPluginScreensaver));
+            OnPropertyChanged(nameof(ShowFfmpegHint));
+        }
+    }
+
+    public bool IsVideoScreensaver => Config.ScreensaverSource == ScreensaverSourceKind.Video;
+    public bool IsPluginScreensaver => Config.ScreensaverSource == ScreensaverSourceKind.Plugin;
+
+    /// <summary>Screensaver providers contributed by the currently loaded plugins. Read live from
+    /// the registry snapshot when this window is built, which is after any plugin change: the
+    /// Plugins window is modal, so the two are never open at the same time.</summary>
+    public IReadOnlyList<IScreensaverProvider> AvailableScreensaverProviders =>
+        _screensaverRegistry.Providers;
+
+    /// <summary>The selected provider, resolved from the persisted id. Only the id is stored, so a
+    /// config that names an uninstalled plugin simply shows no selection instead of breaking.</summary>
+    public IScreensaverProvider SelectedScreensaverProvider
+    {
+        get => _screensaverRegistry.Get(Config.ScreensaverPluginId);
+        set
+        {
+            Config.ScreensaverPluginId = value?.Id;
+            OnPropertyChanged();
+        }
+    }
+
+    /// <summary>Display name of the selected screensaver clip, or a placeholder when none.
+    /// Prefers the stored original file name; falls back to the (content-hash) asset file
+    /// name for clips selected before the name was tracked.</summary>
+    public string ScreensaverVideoDisplayName
+    {
+        get
+        {
+            if (!string.IsNullOrWhiteSpace(Config.ScreensaverVideoName))
+                return Config.ScreensaverVideoName;
+            return string.IsNullOrWhiteSpace(Config.ScreensaverVideoPath)
+                ? "(none)"
+                : System.IO.Path.GetFileName(Config.ScreensaverVideoPath);
+        }
+    }
+
+    private async Task SelectScreensaverVideo()
+    {
+        var path = await FileDialogHelper.OpenVideoDialog();
+        if (string.IsNullOrEmpty(path) || !System.IO.File.Exists(path)) return;
+
+        // Reference the chosen clip in place — do NOT copy it into the content-addressed
+        // asset store. Screensaver clips can be large and are played by an external ffmpeg
+        // process straight from disk, so a copy only wastes space and is confusing (it
+        // looks like "the wrong file" is playing). Legacy configs that still hold an
+        // "assets/screensavers/<hash>.<ext>" relative path keep working: ResolveAbsolute
+        // handles both an absolute path and the old asset-relative form.
+        Config.ScreensaverVideoPath = path;
+        Config.ScreensaverVideoName = System.IO.Path.GetFileName(path);
+        OnPropertyChanged(nameof(ScreensaverVideoDisplayName));
+    }
+
+    private void ClearScreensaverVideo()
+    {
+        Config.ScreensaverVideoPath = null;
+        Config.ScreensaverVideoName = null;
+        OnPropertyChanged(nameof(ScreensaverVideoDisplayName));
+    }
+
+    // ───────── Haptic ─────────
+
+    // Old configs may still hold up to two haptic steps; only the first drives the
+    // global vibration effect now. Kept at 2 so DevicePostInit's heal loop preserves
+    // (rather than deletes) an existing second step from older config files.
+    public const int MaxHapticSteps = 2;
+
+    private void OnHapticStepsChanged(object sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e)
+    {
+        OnPropertyChanged(nameof(FirstHapticStep));
+    }
+
+    public HapticStep FirstHapticStep =>
+        Config.HapticSteps.Count > 0 ? Config.HapticSteps[0] : null;
+
+    // ───────── Theme ─────────
+
+    public bool ThemeIsDark
+    {
+        get => string.Equals(Config.ThemeVariant, "Dark", StringComparison.OrdinalIgnoreCase);
+        set { if (value) ApplyTheme("Dark"); }
+    }
+    public bool ThemeIsLight
+    {
+        get => string.Equals(Config.ThemeVariant, "Light", StringComparison.OrdinalIgnoreCase);
+        set { if (value) ApplyTheme("Light"); }
+    }
+    public bool ThemeIsSystem
+    {
+        get => string.Equals(Config.ThemeVariant, "System", StringComparison.OrdinalIgnoreCase);
+        set { if (value) ApplyTheme("System"); }
+    }
+
+    private void ApplyTheme(string variant)
+    {
+        if (Config.ThemeVariant == variant) return;
+        Config.ThemeVariant = variant;
+        OnPropertyChanged(nameof(ThemeIsDark));
+        OnPropertyChanged(nameof(ThemeIsLight));
+        OnPropertyChanged(nameof(ThemeIsSystem));
+
+        Application.Current?.RequestedThemeVariant = variant switch
+            {
+                "Light" => ThemeVariant.Light,
+                "Dark" => ThemeVariant.Dark,
+                _ => ThemeVariant.Default
+            };
+    }
+
+    // ───────── About ─────────
+
+    public string Version { get; }
+
+    // ───────── View navigation ─────────
+
+    private SettingsView _currentView;
+    public SettingsView CurrentView
+    {
+        get => _currentView;
+        set => SetProperty(ref _currentView, value);
+    }
+
+    private async Task EditWallpaper(TouchButtonPage page)
+    {
+        if (page == null) return;
+        await _dialogService.ShowDialogAsync<TouchPageWallpaperSettingsViewModel, DialogResult>(
+            vm => vm.Initialize(page));
+    }
+
+    private async Task EditPageCommands(object page)
+    {
+        if (page is not TouchButtonPage && page is not RotaryButtonPage) return;
+        await _dialogService.ShowDialogAsync<PageCommandsSettingsViewModel, DialogResult>(
+            vm => vm.Initialize(page));
+    }
+
+    private void Navigate(SettingsView settingsPage) => CurrentView = settingsPage;
+
+    // ───────── Key alignment ─────────
+
+    /// <summary>
+    /// The calibration the editing controls work on. Reads through to the device default
+    /// until the user changes something, so the fields show real numbers from the start
+    /// rather than zeros they would then have to guess their way out of.
+    /// </summary>
+    private KeyGridCalibration Calibration => Config?.EffectiveKeyCalibration ?? new KeyGridCalibration();
+
+    public int KeyCalibrationSize => Calibration.KeySize;
+    public int KeyCalibrationSpacingX => Calibration.SpacingX;
+    public int KeyCalibrationSpacingY => Calibration.SpacingY;
+    public int KeyCalibrationFirstCenterX => Calibration.FirstCenterX;
+    public int KeyCalibrationFirstCenterY => Calibration.FirstCenterY;
+
+    /// <summary>True once the user has their own calibration, i.e. Reset would do something.</summary>
+    public bool HasCustomKeyCalibration => Config?.KeyCalibration != null;
+
+    /// <summary>
+    /// Adjusts one field of the calibration by a signed step. The parameter is
+    /// "&lt;field&gt;:&lt;delta&gt;" so the five fields need one command rather than ten.
+    /// </summary>
+    public IRelayCommand AdjustKeyCalibrationCommand => field ??= Relay.Create<string>(AdjustKeyCalibration);
+
+    public IRelayCommand ResetKeyCalibrationCommand =>
+        field ??= Relay.Create(ResetKeyCalibration, () => HasCustomKeyCalibration);
+
+    public IRelayCommand ToggleAlignmentPreviewCommand => field ??= Relay.Create(ToggleAlignmentPreview);
+
+    public bool IsAlignmentPreviewActive
+    {
+        get;
+        private set => SetProperty(ref field, value);
+    }
+
+    private void AdjustKeyCalibration(string parameter)
+    {
+        string[] parts = parameter?.Split(':');
+        if (parts is not { Length: 2 } || !int.TryParse(parts[1], out int delta)) return;
+
+        KeyGridCalibration current = Calibration;
+        KeyGridCalibration updated = parts[0] switch
+        {
+            // A key can never be smaller than a pixel, and the pitch can never be smaller
+            // than the key or neighbours would overlap.
+            "size" => current with { KeySize = Math.Max(1, current.KeySize + delta) },
+            "spacingX" => current with { SpacingX = Math.Max(1, current.SpacingX + delta) },
+            "spacingY" => current with { SpacingY = Math.Max(1, current.SpacingY + delta) },
+            "centerX" => current with { FirstCenterX = current.FirstCenterX + delta },
+            "centerY" => current with { FirstCenterY = current.FirstCenterY + delta },
+            _ => current
+        };
+
+        if (updated == current) return;
+
+        ApplyKeyCalibration(updated);
+    }
+
+    private void ResetKeyCalibration() => ApplyKeyCalibration(null);
+
+    /// <summary>
+    /// Publishes a calibration to the config. Assigning the property is what reaches the
+    /// device: the controller listens for the change, pushes it and repaints.
+    /// </summary>
+    private void ApplyKeyCalibration(KeyGridCalibration calibration)
+    {
+        if (Config == null) return;
+
+        Config.KeyCalibration = calibration;
+
+        OnPropertyChanged(nameof(KeyCalibrationSize));
+        OnPropertyChanged(nameof(KeyCalibrationSpacingX));
+        OnPropertyChanged(nameof(KeyCalibrationSpacingY));
+        OnPropertyChanged(nameof(KeyCalibrationFirstCenterX));
+        OnPropertyChanged(nameof(KeyCalibrationFirstCenterY));
+        OnPropertyChanged(nameof(HasCustomKeyCalibration));
+        ResetKeyCalibrationCommand.NotifyCanExecuteChanged();
+
+        if (IsAlignmentPreviewActive) _ = PushAlignmentPattern();
+    }
+
+    private void ToggleAlignmentPreview()
+    {
+        if (IsAlignmentPreviewActive)
+        {
+            StopAlignmentPreview();
+            return;
+        }
+
+        if (_alignmentProvider != null) return;
+
+        AlignmentExclusiveProvider provider = new(StopAlignmentPreview);
+        if (!_exclusiveMode.TryEnter(provider)) return;
+
+        _alignmentProvider = provider;
+        IsAlignmentPreviewActive = true;
+        _ = PushAlignmentPattern();
+    }
+
+    /// <summary>
+    /// Ends the preview and hands the display back, which makes the controller repaint the
+    /// real page. Safe to call when nothing is running — the window's close handler calls it
+    /// unconditionally.
+    /// </summary>
+    private void StopAlignmentPreview()
+    {
+        AlignmentExclusiveProvider provider = Interlocked.Exchange(ref _alignmentProvider, null);
+        if (provider == null) return;
+
+        _exclusiveMode.Exit(provider);
+        Dispatcher.UIThread.Post(() => IsAlignmentPreviewActive = false);
+    }
+
+    private AlignmentExclusiveProvider _alignmentProvider;
+
+    private async Task PushAlignmentPattern()
+    {
+        LoupedeckDevice.Device.LoupedeckDevice device = _deviceService?.Device;
+        if (device == null) return;
+
+        int slots = device.Columns * device.Rows;
+        List<SKBitmap> tiles = new(slots);
+        try
+        {
+            for (int i = 0; i < slots; i++)
+                tiles.Add(DisplayTestPatternRenderer.RenderAlignmentTile(device.KeySize, i));
+
+            await device.DrawTouchSlotsAtomic(tiles);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[KeyAlignment] pushing the pattern failed: {ex.Message}");
+        }
+        finally
+        {
+            foreach (SKBitmap tile in tiles) tile.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Owns the display while the alignment pattern is shown. Declares no rendering of its
+    /// own so the host does not composite empty touch entries over the pattern, and any
+    /// press on the device ends the preview.
+    /// </summary>
+    private sealed class AlignmentExclusiveProvider(Action onStop) : IExclusiveModeProvider
+    {
+        public string Title => "Key Alignment";
+
+        public ExclusiveRenderMode RenderMode => ExclusiveRenderMode.None;
+
+        public event EventHandler EntriesChanged
+        {
+            add { }
+            remove { }
+        }
+
+        public void OnEnter() { }
+        public void OnExit() { }
+        public IReadOnlyList<FolderEntry> BuildTouchEntries() => [];
+        public void OnSimpleButtonPressed(int index) => onStop();
+        public void OnTouchPressed(int slotIndex) => onStop();
+        public void OnRotaryPressed(int index) => onStop();
+        public void OnRotated(int index, int delta) { }
+    }
+}

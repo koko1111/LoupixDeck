@@ -1,0 +1,532 @@
+<Styles xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <Style Selector="Border.card">
+        <Setter Property="Background" Value="{DynamicResource AppSurface}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource AppBorderSubtle}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="CornerRadius" Value="8" />
+        <Setter Property="Padding" Value="16" />
+        <Setter Property="Margin" Value="0,0,20,12" />
+    </Style>
+
+    <Style Selector="TextBlock.page-title">
+        <Setter Property="FontSize" Value="24" />
+        <Setter Property="FontWeight" Value="Bold" />
+        <Setter Property="Margin" Value="0,0,0,12" />
+    </Style>
+
+    <Style Selector="TextBlock.section-header">
+        <Setter Property="FontSize" Value="11" />
+        <Setter Property="FontWeight" Value="Bold" />
+        <Setter Property="Foreground" Value="{DynamicResource AppTextSecondary}" />
+        <Setter Property="Margin" Value="14,16,0,4" />
+    </Style>
+
+    <Style Selector="TextBlock.card-title">
+        <Setter Property="FontSize" Value="16" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Margin" Value="0,0,0,10" />
+    </Style>
+
+    <Style Selector="TextBlock.label">
+        <Setter Property="Foreground" Value="{DynamicResource AppTextSecondary}" />
+        <Setter Property="FontSize" Value="12" />
+    </Style>
+
+    <Style Selector="TextBlock.value">
+        <Setter Property="FontSize" Value="13" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
+
+    <Style Selector="TextBlock.hint">
+        <Setter Property="Foreground" Value="{DynamicResource AppTextSecondary}" />
+        <Setter Property="FontSize" Value="13" />
+        <Setter Property="TextWrapping" Value="Wrap" />
+    </Style>
+
+    <!-- Status pill - base shape, colour via .ok / .warn / .error / .info / .neutral.
+         Same design as the diagnostics chips (DiagnosticPalette): a loud fill, a 1.5px border in
+         a darker shade of that fill so the chip keeps a hard edge on a white card and on the dark
+         surface alike, and near-black ink instead of white or a tinted label. Fixed colours, not
+         theme resources: a pass has to read as a pass in both themes. -->
+    <Style Selector="Border.pill">
+        <Setter Property="CornerRadius" Value="999" />
+        <Setter Property="Padding" Value="11,3" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+    <Style Selector="Border.pill TextBlock">
+        <Setter Property="FontSize" Value="11" />
+        <Setter Property="FontWeight" Value="Bold" />
+    </Style>
+    <Style Selector="Border.pill.ok">
+        <Setter Property="Background" Value="#29D95F" />
+        <Setter Property="BorderBrush" Value="#17A845" />
+        <Setter Property="BorderThickness" Value="1.5" />
+    </Style>
+    <Style Selector="Border.pill.ok TextBlock">
+        <Setter Property="Foreground" Value="#06280F" />
+    </Style>
+    <Style Selector="Border.pill.error">
+        <Setter Property="Background" Value="#FF5A4D" />
+        <Setter Property="BorderBrush" Value="#C62828" />
+        <Setter Property="BorderThickness" Value="1.5" />
+    </Style>
+    <Style Selector="Border.pill.error TextBlock">
+        <Setter Property="Foreground" Value="#2E0A06" />
+    </Style>
+    <Style Selector="Border.pill.warn">
+        <Setter Property="Background" Value="#FFC400" />
+        <Setter Property="BorderBrush" Value="#C79400" />
+        <Setter Property="BorderThickness" Value="1.5" />
+    </Style>
+    <Style Selector="Border.pill.warn TextBlock">
+        <Setter Property="Foreground" Value="#2A1D00" />
+    </Style>
+    <!-- Info: news rather than a warning (an update is available). A blue of the same strength as
+         the other three, fixed rather than the theme accent, so the set stays one design. -->
+    <Style Selector="Border.pill.info">
+        <Setter Property="Background" Value="#4DA3FF" />
+        <Setter Property="BorderBrush" Value="#1A6FC4" />
+        <Setter Property="BorderThickness" Value="1.5" />
+    </Style>
+    <Style Selector="Border.pill.info TextBlock">
+        <Setter Property="Foreground" Value="#04203A" />
+    </Style>
+    <Style Selector="Border.pill.neutral">
+        <Setter Property="Background" Value="#C7CDD3" />
+        <Setter Property="BorderBrush" Value="#8E979F" />
+        <Setter Property="BorderThickness" Value="1.5" />
+    </Style>
+    <Style Selector="Border.pill.neutral TextBlock">
+        <Setter Property="Foreground" Value="#1F2429" />
+    </Style>
+
+    <!-- Sidebar nav button -->
+    <Style Selector="Button.nav">
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="Padding" Value="0" />
+        <Setter Property="Margin" Value="0,1" />
+        <Setter Property="HorizontalAlignment" Value="Stretch" />
+        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+        <Setter Property="CornerRadius" Value="4" />
+        <Setter Property="Height" Value="32" />
+    </Style>
+    <Style Selector="Button.nav:pointerover /template/ ContentPresenter">
+        <Setter Property="Background" Value="{DynamicResource AppControlBackgroundHover}" />
+    </Style>
+    <Style Selector="Button.nav.active /template/ ContentPresenter">
+        <Setter Property="Background" Value="{DynamicResource AppControlBackgroundActive}" />
+    </Style>
+
+    <Style Selector="TextBlock.nav-icon">
+        <Setter Property="FontFamily" Value="{DynamicResource MdiFont}" />
+        <Setter Property="FontSize" Value="18" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+        <Setter Property="HorizontalAlignment" Value="Center" />
+        <Setter Property="Width" Value="24" />
+    </Style>
+    <Style Selector="TextBlock.nav-label">
+        <Setter Property="VerticalAlignment" Value="Center" />
+        <Setter Property="Margin" Value="10,0,0,0" />
+        <Setter Property="FontSize" Value="13" />
+    </Style>
+
+    <Style Selector="Border.nav-accent">
+        <Setter Property="Width" Value="3" />
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="CornerRadius" Value="2" />
+    </Style>
+    <Style Selector="Button.nav.active Border.nav-accent">
+        <Setter Property="Background" Value="#4DA3FF" />
+    </Style>
+
+    <!-- Editor panel: card look for the button-editor dialogs, but without the
+         settings card's outer margin so the dialog grid controls spacing. -->
+    <Style Selector="Border.editor-panel">
+        <Setter Property="Background" Value="{DynamicResource AppSurface}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource AppBorderSubtle}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="CornerRadius" Value="8" />
+        <Setter Property="Padding" Value="12" />
+    </Style>
+
+    <Style Selector="TextBlock.panel-title">
+        <Setter Property="FontSize" Value="14" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Margin" Value="0,0,0,8" />
+    </Style>
+
+    <!-- Small toolbar button (layer toolbar, preview toolbar). -->
+    <Style Selector="Button.toolbar">
+        <Setter Property="Height" Value="28" />
+        <Setter Property="Padding" Value="8,0" />
+        <Setter Property="FontSize" Value="12" />
+        <!-- Explicit rather than relying on the Fluent default, so a stretched toolbar button
+             centres its label like the fixed-width ones next to it instead of hugging the left
+             edge. Toolbar buttons sit in rows and must line up with each other. -->
+        <Setter Property="HorizontalContentAlignment" Value="Center" />
+        <Setter Property="VerticalContentAlignment" Value="Center" />
+        <Setter Property="CornerRadius" Value="4" />
+    </Style>
+
+    <!-- Accent variant: for the one action in a panel that opens something rather than
+         tweaking a value, so it does not disappear into a row of neutral buttons. Styles the
+         ContentPresenter (not the Button) so the :pointerover state still wins, mirroring
+         ToggleButton.toolbar:checked below. -->
+    <Style Selector="Button.toolbar.accent /template/ ContentPresenter">
+        <Setter Property="Background" Value="{DynamicResource AppAccentSubtle}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource PageActiveBorderBrush}" />
+        <Setter Property="BorderThickness" Value="1" />
+    </Style>
+    <Style Selector="Button.toolbar.accent:pointerover /template/ ContentPresenter">
+        <Setter Property="Background" Value="{DynamicResource PageActiveBrush}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource PageActiveBorderBrush}" />
+        <Setter Property="Foreground" Value="White" />
+    </Style>
+    <Style Selector="Button.toolbar.accent:pressed /template/ ContentPresenter">
+        <Setter Property="Background" Value="{DynamicResource AppControlBackgroundActive}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource PageActiveBorderBrush}" />
+    </Style>
+
+    <!-- Toggle variant for the preview toolbar (Grid / Snap). Mirrors the button
+         metrics and highlights with the accent color when active. -->
+    <Style Selector="ToggleButton.toolbar">
+        <Setter Property="Height" Value="28" />
+        <Setter Property="Padding" Value="8,0" />
+        <Setter Property="FontSize" Value="12" />
+        <Setter Property="VerticalContentAlignment" Value="Center" />
+        <Setter Property="CornerRadius" Value="4" />
+    </Style>
+    <Style Selector="ToggleButton.toolbar:checked /template/ ContentPresenter">
+        <Setter Property="Background" Value="{DynamicResource AppAccentSubtle}" />
+        <Setter Property="Foreground" Value="{DynamicResource AppTextPrimary}" />
+    </Style>
+
+    <!-- Layer-type badge in the layer list ("T" / "I" / "S"). -->
+    <Style Selector="Border.layer-badge">
+        <Setter Property="Width" Value="20" />
+        <Setter Property="Height" Value="20" />
+        <Setter Property="CornerRadius" Value="4" />
+        <Setter Property="Background" Value="{DynamicResource AppSurfaceAlt}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource AppBorderSubtle}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="Margin" Value="0,0,8,0" />
+    </Style>
+    <Style Selector="Border.layer-badge TextBlock">
+        <Setter Property="FontSize" Value="11" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="HorizontalAlignment" Value="Center" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+
+    <!-- Row action button (small square; up/down/remove in lists) -->
+    <Style Selector="Button.row-action">
+        <Setter Property="Background" Value="{DynamicResource AppControlBackground}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource AppBorderSubtle}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="CornerRadius" Value="4" />
+        <Setter Property="Width" Value="28" />
+        <Setter Property="Height" Value="28" />
+        <Setter Property="Padding" Value="0" />
+        <Setter Property="HorizontalContentAlignment" Value="Center" />
+        <Setter Property="VerticalContentAlignment" Value="Center" />
+        <Setter Property="Margin" Value="0,0,4,0" />
+        <Setter Property="FontSize" Value="14" />
+    </Style>
+    <Style Selector="Button.row-action:pointerover /template/ ContentPresenter">
+        <Setter Property="Background" Value="{DynamicResource AppControlBackgroundHover}" />
+    </Style>
+    <Style Selector="Button.row-action:disabled">
+        <Setter Property="Opacity" Value="0.35" />
+    </Style>
+    <Style Selector="Button.row-action.danger">
+        <Setter Property="Background" Value="#3A2424" />
+        <Setter Property="BorderBrush" Value="#5A2C2C" />
+        <Setter Property="Foreground" Value="#E08A8A" />
+    </Style>
+    <Style Selector="Button.row-action.danger:pointerover /template/ ContentPresenter">
+        <Setter Property="Background" Value="#4A2A2A" />
+    </Style>
+
+    <!-- ===== Profile / context rule cards (Profile Rules settings) ===== -->
+
+    <!-- One card per rule; slightly raised surface, subtle border, gentle hover. -->
+    <Style Selector="Border.rule-card">
+        <Setter Property="Background" Value="{DynamicResource AppSurfaceAlt}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource AppBorderSubtle}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="CornerRadius" Value="8" />
+        <Setter Property="Padding" Value="14" />
+        <Setter Property="Margin" Value="0,0,0,10" />
+    </Style>
+    <Style Selector="Border.rule-card:pointerover">
+        <Setter Property="Background" Value="{DynamicResource AppControlBackgroundActive}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource AppTextMuted}" />
+    </Style>
+
+    <!-- Small section heading inside a rule card (Match / Target / Additional options). Primary text:
+         secondary grey is hard to read on the raised card surface, more so on hover. -->
+    <Style Selector="TextBlock.group-label">
+        <Setter Property="FontSize" Value="11" />
+        <Setter Property="FontWeight" Value="Bold" />
+        <Setter Property="Foreground" Value="{DynamicResource AppTextPrimary}" />
+    </Style>
+
+    <!-- Field labels inside a rule card, for the same reason. Hints stay secondary. -->
+    <Style Selector="Border.rule-card TextBlock.label">
+        <Setter Property="Foreground" Value="{DynamicResource AppTextPrimary}" />
+    </Style>
+
+    <!-- The thing a block inside a rule card is about, e.g. a companion's device name. -->
+    <Style Selector="TextBlock.rule-subject">
+        <Setter Property="FontSize" Value="13" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Foreground" Value="{DynamicResource AppTextPrimary}" />
+    </Style>
+
+    <!-- Grouping box that visually ties related controls together (e.g. fallback profile). -->
+    <Style Selector="Border.rule-group">
+        <Setter Property="Background" Value="{DynamicResource AppSurfaceAlt}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource AppBorderSubtle}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="CornerRadius" Value="6" />
+        <Setter Property="Padding" Value="12,10" />
+    </Style>
+
+    <!-- Connector arrow between the Profile and Workspace target fields. -->
+    <Style Selector="TextBlock.target-arrow">
+        <Setter Property="FontSize" Value="18" />
+        <Setter Property="Foreground" Value="{DynamicResource AppTextMuted}" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+        <Setter Property="HorizontalAlignment" Value="Center" />
+    </Style>
+
+    <!-- Uniform field height for the rule inputs (text boxes, combo boxes). -->
+    <Style Selector="Border.rule-card TextBox">
+        <Setter Property="MinHeight" Value="32" />
+    </Style>
+    <Style Selector="Border.rule-card ComboBox">
+        <Setter Property="MinHeight" Value="32" />
+    </Style>
+
+    <!-- Delete button: neutral by default, red on hover (reuses the danger palette
+         already used by Button.row-action.danger). -->
+    <Style Selector="Button.rule-delete">
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="CornerRadius" Value="4" />
+        <Setter Property="Width" Value="28" />
+        <Setter Property="Height" Value="28" />
+        <Setter Property="Padding" Value="0" />
+        <Setter Property="FontSize" Value="14" />
+        <Setter Property="HorizontalContentAlignment" Value="Center" />
+        <Setter Property="VerticalContentAlignment" Value="Center" />
+        <Setter Property="Foreground" Value="{DynamicResource AppTextMuted}" />
+    </Style>
+    <Style Selector="Button.rule-delete:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+        <Setter Property="Background" Value="#4A2A2A" />
+        <Setter Property="Foreground" Value="#E08A8A" />
+    </Style>
+
+    <!-- ===== Command-chain cards (touch-button command editor) ===== -->
+
+    <!-- Drop zone for the command chain; highlights while dragging a command over it.
+         The transparent border is always present so toggling the highlight adds no
+         layout shift. -->
+    <Style Selector="Border.command-drop">
+        <Setter Property="BorderBrush" Value="Transparent" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="CornerRadius" Value="6" />
+        <Setter Property="Padding" Value="4" />
+    </Style>
+    <Style Selector="Border.command-drop.drop-active">
+        <Setter Property="BorderBrush" Value="#4DA3FF" />
+    </Style>
+
+    <!-- One card per chained command, listed vertically. -->
+    <Style Selector="Border.command-card">
+        <Setter Property="Background" Value="{DynamicResource AppSurface}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource AppBorderSubtle}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="CornerRadius" Value="6" />
+        <Setter Property="Margin" Value="0,0,0,6" />
+        <Setter Property="Padding" Value="10,4" />
+    </Style>
+    <Style Selector="Border.command-card.dragging">
+        <Setter Property="Opacity" Value="0.55" />
+        <Setter Property="BorderBrush" Value="#4DA3FF" />
+    </Style>
+
+    <Style Selector="TextBlock.card-type">
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="FontSize" Value="13" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+        <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+    </Style>
+    <Style Selector="TextBlock.card-value">
+        <Setter Property="Foreground" Value="{DynamicResource AppTextSecondary}" />
+        <Setter Property="FontSize" Value="12" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+        <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+    </Style>
+
+    <!-- Bottom pipeline strip holding the assigned command sequence. Same look
+         as an editor panel, plus a drop highlight while a tree drag hovers it.
+         The border is always present so toggling adds no layout shift. -->
+    <Style Selector="Border.sequence-strip">
+        <Setter Property="Background" Value="{DynamicResource AppSurface}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource AppBorderSubtle}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="CornerRadius" Value="8" />
+        <Setter Property="Padding" Value="12,8" />
+    </Style>
+    <Style Selector="Border.sequence-strip.drop-active">
+        <Setter Property="BorderBrush" Value="#4DA3FF" />
+    </Style>
+
+    <!-- "→" connector drawn in the fixed-width gutter before each chip; hidden on
+         the first chip of each wrapped row so rows stay left-aligned. -->
+    <Style Selector="TextBlock.sequence-arrow">
+        <Setter Property="Foreground" Value="{DynamicResource AppTextMuted}" />
+        <Setter Property="FontSize" Value="16" />
+    </Style>
+
+    <!-- Round sequence-number badge inside a chip. -->
+    <Style Selector="Border.chip-index">
+        <Setter Property="Width" Value="18" />
+        <Setter Property="Height" Value="18" />
+        <Setter Property="CornerRadius" Value="9" />
+        <Setter Property="Background" Value="{DynamicResource AppSurfaceAlt}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource AppBorderSubtle}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+        <Setter Property="Margin" Value="0,0,2,0" />
+    </Style>
+    <Style Selector="Border.chip-index TextBlock">
+        <Setter Property="FontSize" Value="10" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Foreground" Value="{DynamicResource AppTextSecondary}" />
+        <Setter Property="HorizontalAlignment" Value="Center" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+
+    <!-- Chip used in the wrapped "Assigned commands" sequence. Fixed width so all
+         chips line up uniformly; long command names wrap and grow the chip
+         vertically instead of widening it. Vertical margins are symmetric so the
+         connector arrow lines up with the chip's center. -->
+    <Style Selector="Border.command-chip">
+        <Setter Property="Background" Value="{DynamicResource AppSurface}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource AppBorderSubtle}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="CornerRadius" Value="8" />
+        <Setter Property="Padding" Value="4,3" />
+        <Setter Property="Margin" Value="0,3,6,3" />
+        <Setter Property="Width" Value="210" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+    <Style Selector="Border.command-chip.dragging">
+        <Setter Property="Opacity" Value="0.55" />
+        <Setter Property="BorderBrush" Value="#4DA3FF" />
+    </Style>
+    <Style Selector="TextBlock.chip-title">
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="FontSize" Value="12" />
+        <Setter Property="TextWrapping" Value="Wrap" />
+        <Setter Property="Margin" Value="2,0" />
+    </Style>
+    <!-- Small icon button (edit / remove) inside a chip. -->
+    <Style Selector="Button.chip-action">
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="CornerRadius" Value="10" />
+        <Setter Property="Width" Value="22" />
+        <Setter Property="Height" Value="22" />
+        <Setter Property="Padding" Value="0" />
+        <Setter Property="FontSize" Value="14" />
+        <Setter Property="HorizontalContentAlignment" Value="Center" />
+        <Setter Property="VerticalContentAlignment" Value="Center" />
+        <Setter Property="Foreground" Value="{DynamicResource AppTextMuted}" />
+    </Style>
+    <Style Selector="Button.chip-action:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+        <Setter Property="Background" Value="{DynamicResource AppControlBackgroundHover}" />
+    </Style>
+    <Style Selector="Button.chip-action.danger:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+        <Setter Property="Background" Value="#A03030" />
+        <Setter Property="Foreground" Value="White" />
+    </Style>
+    <!-- Compact grip variant of the drag handle for chips. -->
+    <Style Selector="Border.drag-handle.chip-grip">
+        <Setter Property="Padding" Value="2,0" />
+    </Style>
+    <Style Selector="Border.drag-handle.chip-grip TextBlock">
+        <Setter Property="FontSize" Value="16" />
+    </Style>
+
+    <!-- Floating chip that follows the cursor while dragging from the command
+         tree. Looks like a command chip but lifted off the surface (shadow +
+         slight transparency) so it reads as "in transit". -->
+    <Style Selector="Border.drag-ghost">
+        <Setter Property="Background" Value="{DynamicResource AppSurfaceAlt}" />
+        <Setter Property="BorderBrush" Value="#4DA3FF" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="CornerRadius" Value="14" />
+        <Setter Property="Padding" Value="8,4" />
+        <Setter Property="Opacity" Value="0.9" />
+        <Setter Property="BoxShadow" Value="0 4 14 0 #66000000" />
+    </Style>
+
+    <!-- Drag handle (reorder cards) -->
+    <Style Selector="Border.drag-handle">
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="Cursor" Value="SizeAll" />
+        <Setter Property="Padding" Value="6,0" />
+    </Style>
+    <Style Selector="Border.drag-handle TextBlock">
+        <Setter Property="FontFamily" Value="{DynamicResource MdiFont}" />
+        <Setter Property="FontSize" Value="20" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+        <Setter Property="Foreground" Value="{DynamicResource AppTextMuted}" />
+    </Style>
+    <Style Selector="Border.drag-handle:pointerover TextBlock">
+        <Setter Property="Foreground" Value="{DynamicResource AppTextPrimary}" />
+    </Style>
+
+    <!-- Inline editor revealed under a card -->
+    <Style Selector="Border.card-editor">
+        <Setter Property="BorderBrush" Value="{DynamicResource AppBorderSubtle}" />
+        <Setter Property="BorderThickness" Value="0,1,0,0" />
+        <Setter Property="Margin" Value="0,4,0,0" />
+        <Setter Property="Padding" Value="2,8,2,4" />
+    </Style>
+
+    <!-- Collapse/expand toggle on each card -->
+    <Style Selector="ToggleButton.card-expand">
+        <Setter Property="Background" Value="{DynamicResource AppControlBackground}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource AppBorderSubtle}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="CornerRadius" Value="4" />
+        <Setter Property="Width" Value="28" />
+        <Setter Property="Height" Value="28" />
+        <Setter Property="Padding" Value="0" />
+        <Setter Property="HorizontalContentAlignment" Value="Center" />
+        <Setter Property="VerticalContentAlignment" Value="Center" />
+        <Setter Property="Margin" Value="0,0,4,0" />
+        <Setter Property="FontSize" Value="14" />
+        <Setter Property="FontFamily" Value="{DynamicResource MdiFont}" />
+        <Setter Property="Content" Value="&#xF0140;" />
+        <!-- mdi-chevron-down -->
+    </Style>
+    <Style Selector="ToggleButton.card-expand:checked">
+        <Setter Property="Content" Value="&#xF0143;" />
+        <!-- mdi-chevron-up -->
+    </Style>
+    <Style Selector="ToggleButton.card-expand:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+        <Setter Property="Background" Value="{DynamicResource AppControlBackgroundHover}" />
+    </Style>
+    <Style Selector="ToggleButton.card-expand:checked /template/ ContentPresenter#PART_ContentPresenter">
+        <Setter Property="Background" Value="{DynamicResource AppControlBackgroundActive}" />
+        <Setter Property="Foreground" Value="{DynamicResource AppTextPrimary}" />
+    </Style>
+</Styles>

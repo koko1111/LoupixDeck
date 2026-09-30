@@ -1,0 +1,59 @@
+root = true
+# All files
+[*]
+indent_style = space
+
+# XML project files
+[*.{csproj}]
+indent_size = 2
+
+# XML config files
+[*.{props,targets,config,nuspec,resx}]
+indent_size = 2
+
+# Code files
+[*.{cs}]
+indent_size = 4
+# end_of_line = lf
+insert_final_newline = false
+charset = utf-8
+
+###############################
+# .NET Coding Conventions     #
+###############################
+[*.{cs}]
+dotnet_diagnostic.IDE0005.severity = suggestion # IDE0005: Using directive is unnecessary.
+dotnet_style_prefer_collection_expression = false # IDE0305: Simplify collection initialization
+
+# Organize usings
+dotnet_sort_system_directives_first = true
+
+# New line preferences
+dotnet_style_allow_multiple_blank_lines_experimental = false:suggestion
+
+# Parentheses preferences
+dotnet_style_parentheses_in_arithmetic_binary_operators = always_for_clarity:warning
+dotnet_style_parentheses_in_relational_binary_operators = always_for_clarity:warning
+dotnet_style_parentheses_in_other_binary_operators = always_for_clarity:warning
+dotnet_style_parentheses_in_other_operators = always_for_clarity:suggestion
+
+# Null-checking preferences
+# review: csharp_style_throw_expression = false:silent
+csharp_style_conditional_delegate_call = true:suggestion
+
+# Modifier preferences
+csharp_prefer_static_local_function = true:suggestion
+csharp_preferred_modifier_order = public,private,protected,internal,static,extern,new,virtual,abstract,sealed,override,readonly,unsafe,volatile,async
+
+# Code-block preferences
+csharp_prefer_braces = when_multiline:suggestion
+
+#AnalyzerSettings
+dotnet_style_namespace_match_folder = true:warning
+
+# TODO: review the following rules:
+# Use explicit type (not var)
+dotnet_diagnostic.IDE0008.severity = silent
+
+# Remove unnecessary parentheses
+dotnet_diagnostic.IDE0047.severity = none

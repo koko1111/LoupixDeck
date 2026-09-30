@@ -1,0 +1,185 @@
+using LoupixDeck.Models;
+using LoupixDeck.Services;
+
+namespace LoupixDeck.Controllers;
+
+/// <summary>
+/// Lifecycle contract every device controller exposes to the rest of the app.
+/// Keeps MainWindowViewModel and PageCommands decoupled from the concrete
+/// controller implementation now that we support more than one device family.
+/// </summary>
+public interface IDeviceController
+{
+    IPageManager PageManager { get; }
+    LoupedeckConfig Config { get; }
+
+    /// <summary>
+    /// Path of this device's configuration file. Exposed so a caller that has to write the
+    /// config back — the plugin command migration — uses the same path the controller saves
+    /// to, instead of recomputing it from the device info in a second place.
+    /// </summary>
+    string ConfigPath { get; }
+
+    /// <summary>
+    /// True while the device is in the manually-off / suspended state — inputs
+    /// are suppressed unless the source button has EnableWhenOff set.
+    /// </summary>
+    bool IsDeviceOff { get; }
+
+    /// <summary>
+    /// True while the device's serial link is open and usable. A device can be present on the
+    /// USB bus yet not connected — e.g. another program held its port at startup — in which case
+    /// the hot-plug reconciler uses this to know a reconnect is needed.
+    /// </summary>
+    bool IsDeviceConnected { get; }
+
+    /// <summary>
+    /// Raised on the UI thread every time the device's serial link comes up, including a
+    /// reconnect after the port was taken at startup. Lets the shell hold a device back until
+    /// it is actually reachable: bringing one up no longer proves it ever connected, so without
+    /// this a device whose port was busy would sit in the switcher with nothing behind it.
+    /// </summary>
+    event EventHandler DeviceConnected;
+
+    /// <summary>
+    /// Requests a single background reconnect for a device that is present but whose serial link
+    /// is down (its port was momentarily busy). Non-blocking and self-throttling: a call is
+    /// dropped while another reconnect is already in flight. Safe to call repeatedly.
+    /// </summary>
+    void RequestReconnect();
+
+    Task Initialize(string port = null, int baudrate = 0);
+    void SaveConfig();
+
+    /// <summary>
+    /// Tears the controller down for a hot-unplug (issue #116 phase 3b): closes the
+    /// serial connection (stopping the device's auto-reconnect loop), detaches any
+    /// plugin side-strip providers, and unsubscribes from page/config/device events
+    /// so nothing keeps drawing to the gone device. The owning child provider is
+    /// intentionally NOT disposed (it would dispose the shared root singletons it
+    /// forwards), so this method is the full device-local cleanup.
+    /// </summary>
+    void Shutdown();
+
+    /// <summary>Sets brightness to 0 and turns off all LED buttons. Input from
+    /// the device is then ignored unless a button opts in via EnableWhenOff.</summary>
+    Task ClearDeviceState();
+
+    /// <summary>Restores brightness, LED colours and the current touch page.</summary>
+    Task RestoreDeviceState();
+
+    /// <summary>
+    /// Repaints the current touch page from config. No-op while the device is off
+    /// or folder/exclusive mode owns the screen. Used after a plugin hot-reload so
+    /// added/removed command buttons reflect on the device. UI thread.
+    /// </summary>
+    Task RedrawCurrentTouchPage();
+
+    /// <summary>Convenience: flips between Clear and Restore.</summary>
+    Task ToggleDeviceState();
+
+    /// <summary>
+    /// Re-pushes the state the hardware lost across a power cycle — brightness, LED
+    /// colours, the current touch page and the side strips — after the serial link was
+    /// re-established (issue #195). A device blanked by <see cref="HandleSystemSuspend"/>
+    /// is switched back on here, because the connect proves the hardware power-cycled;
+    /// a device the user turned off has its blanked state re-applied instead.
+    /// </summary>
+    Task ResyncDeviceState();
+
+    /// <summary>
+    /// Blanks the device because the host is suspending. Same visible result as
+    /// <see cref="ClearDeviceState"/>, but the off state is marked as not the user's
+    /// doing, so the next connect turns the device back on even when the OS never
+    /// reports the resume (Modern Standby / S0, issue #195).
+    /// </summary>
+    Task HandleSystemSuspend();
+
+    /// <summary>
+    /// Handles a system resume: re-establishes the serial link (the handle from before
+    /// the suspend is dead even when the port is still listed), takes the device out of
+    /// the state the suspend handler blanked it into, and re-pushes everything (#195).
+    /// </summary>
+    Task HandleSystemResume();
+
+    /// <summary>
+    /// Detaches any plugin-override side-strip providers currently driving a strip
+    /// (calls their OnDetach). Used before a plugin unload so a live provider can't
+    /// pin its collectible load context. No-op on devices without side strips.
+    /// </summary>
+    void DetachAllSideStripProviders();
+
+    /// <summary>
+    /// Re-evaluates plugin-override attachment for both side strips and repaints them
+    /// (a reloaded provider re-attaches; an orphaned binding falls back to segmented).
+    /// No-op while the device is off / folder / exclusive mode owns it, or on devices
+    /// without side strips.
+    /// </summary>
+    Task RefreshSideStrips();
+
+    /// <summary>
+    /// Re-renders and pushes one side's strip for a single animation frame, honoring the
+    /// per-side redraw gate / rate-limit and skipping while a swipe drag or transition owns
+    /// the strip. No-op on devices without side strips. Safe to call from the animation loop.
+    /// </summary>
+    Task RefreshSideStripAnimationFrame(RotarySide side);
+
+    /// <summary>
+    /// Repaints the side strips that carry a dial bound to <paramref name="commandName"/>, so a
+    /// plugin whose adjustment value changed can get its dial indicator redrawn — the dial
+    /// counterpart of <see cref="LoupixDeck.PluginSdk.IPluginHost.RequestButtonRefresh"/>.
+    /// Honors the per-side redraw gate and skips a side a swipe owns. No-op on devices without
+    /// side strips and when no current dial is bound to the command.
+    /// </summary>
+    Task RefreshDialsForCommand(string commandName);
+
+    /// <summary>Global "next rotary page" with a slide transition on side-strip devices
+    /// (both columns animate); instant fallback otherwise or when animation is unavailable.</summary>
+    void AnimateNextRotaryPage();
+
+    /// <summary>Global "previous rotary page" with a slide transition on side-strip devices
+    /// (both columns animate); instant fallback otherwise or when animation is unavailable.</summary>
+    void AnimatePreviousRotaryPage();
+
+    /// <summary>Per-side rotary paging with a slide transition (on-screen GUI side buttons);
+    /// instant fallback when animation is unavailable.</summary>
+    void AnimateRotaryPageForSide(RotarySide side, bool next);
+
+    /// <summary>Goto-by-index rotary paging with a slide transition in the shortest wrap
+    /// direction; instant fallback when animation is unavailable. <paramref name="pageIndex"/>
+    /// is 0-based.</summary>
+    void AnimateGotoRotaryPage(int pageIndex);
+
+    /// <summary>Per-side goto-by-index rotary paging with a slide transition in the shortest wrap
+    /// direction (side-strip devices); instant fallback otherwise or when animation is unavailable.
+    /// <paramref name="pageIndex"/> is 0-based.</summary>
+    void AnimateGotoRotaryPageForSide(RotarySide side, int pageIndex);
+
+    /// <summary>"Next touch page" with a horizontal slide transition; instant fallback when the
+    /// animation is unavailable.</summary>
+    void AnimateNextTouchPage();
+
+    /// <summary>"Previous touch page" with a horizontal slide transition; instant fallback when
+    /// the animation is unavailable.</summary>
+    void AnimatePreviousTouchPage();
+
+    /// <summary>Goto-by-index touch paging with a slide transition in the shortest wrap
+    /// direction; instant fallback when the animation is unavailable. <paramref name="pageIndex"/>
+    /// is 0-based.</summary>
+    void AnimateGotoTouchPage(int pageIndex);
+
+    /// <summary>(Re)binds the controller's touch-page event handlers onto the active workspace's
+    /// pages, detaching the previously bound workspace first (issue #132). Called after a
+    /// profile/workspace switch changes which page collection is active.</summary>
+    void BindActiveWorkspaceTouchPages();
+
+    /// <summary>Re-applies and repaints the active workspace after a profile/workspace switch:
+    /// rebinds handlers, re-seeds rotary pages, selects the workspace's startup touch page and
+    /// repaints the touch display and side strips (issue #132). UI thread.</summary>
+    Task ApplyActiveWorkspace();
+
+    /// <summary>Rebuilds, rewires and repaints the round LED buttons for the newly active profile
+    /// (config v12 — each profile owns its own set). Called on a profile switch only; a workspace
+    /// switch keeps the same buttons.</summary>
+    Task ApplyActiveProfileButtons();
+}

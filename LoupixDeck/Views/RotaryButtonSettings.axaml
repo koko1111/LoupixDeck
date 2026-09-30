@@ -1,0 +1,365 @@
+﻿<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:loc="using:LoupixDeck.Localization"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:local="clr-namespace:LoupixDeck"
+        xmlns:vm="using:LoupixDeck.ViewModels"
+        xmlns:views="using:LoupixDeck.Views"
+        x:Class="LoupixDeck.Views.RotaryButtonSettings"
+        x:DataType="vm:RotaryButtonSettingsViewModel"
+        mc:Ignorable="d"
+        Title="{Binding KnobLabel}"
+        Width="1000"
+        Height="700"
+        MinWidth="820"
+        MinHeight="560"
+        CanResize="True">
+
+    <Window.Resources>
+        <!-- Wrapped, left → top-to-bottom execution order, shared by all three strips. -->
+        <ItemsPanelTemplate x:Key="ChipPanel">
+            <WrapPanel Orientation="Horizontal" />
+        </ItemsPanelTemplate>
+
+        <!-- One chip per chained command. Shared by all three sequence strips; the
+             event handlers resolve their owning strip/slot from the visual tree. -->
+        <DataTemplate x:Key="CommandChipTemplate" DataType="{x:Type vm:CommandSegment}">
+            <!-- Connector gutter + chip. The arrow lives in a fixed-width gutter so
+                 showing/hiding it never re-packs the row; it is hidden on the first
+                 chip of each wrapped row (ShowConnector, maintained from layout in
+                 code-behind), which keeps every row left-aligned. -->
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                <Panel Width="22">
+                    <TextBlock Classes="sequence-arrow" Text="&#x2192;"
+                               HorizontalAlignment="Center"
+                               VerticalAlignment="Center"
+                               IsVisible="{Binding ShowConnector}" />
+                </Panel>
+                <Border Classes="command-chip"
+                        Classes.dragging="{Binding IsDragging}"
+                        ToolTip.Tip="{Binding DisplayName}">
+                    <Grid ColumnDefinitions="Auto,Auto,*,Auto,Auto">
+                        <Border Grid.Column="0" Classes="drag-handle chip-grip"
+                                VerticalAlignment="Center"
+                                ToolTip.Tip="{loc:Tr RotaryButton_DragToReorder}"
+                                PointerPressed="CommandDragHandle_PointerPressed">
+                            <TextBlock Text="&#xF01DB;" />
+                        </Border>
+
+                        <Border Grid.Column="1" Classes="chip-index"
+                                VerticalAlignment="Center">
+                            <TextBlock Text="{Binding Position}" />
+                        </Border>
+
+                        <TextBlock Grid.Column="2" Classes="chip-title"
+                                   Text="{Binding DisplayName}"
+                                   VerticalAlignment="Center" />
+
+                        <Button Grid.Column="3" Classes="chip-action"
+                                VerticalAlignment="Center"
+                                FontFamily="{StaticResource MdiFont}"
+                                Content="&#xF0140;"
+                                ToolTip.Tip="{loc:Tr RotaryButton_EditParameters}">
+                            <Button.Flyout>
+                                <Flyout Placement="Top">
+                                    <Panel Width="300">
+                                        <!-- Known command: structured parameter fields -->
+                                        <StackPanel Spacing="4"
+                                                    IsVisible="{Binding IsKnown}">
+                                            <ItemsControl ItemsSource="{Binding Parameters}">
+                                                <ItemsControl.ItemTemplate>
+                                                    <DataTemplate DataType="{x:Type vm:CommandParameter}">
+                                                        <Grid ColumnDefinitions="120,*"
+                                                              Margin="0,0,0,4">
+                                                            <TextBlock Grid.Column="0"
+                                                                       Classes="editor-label"
+                                                                       Text="{Binding DisplayName}"
+                                                                       VerticalAlignment="Center"
+                                                                       Margin="0,0,10,0" />
+                                                            <TextBox Grid.Column="1"
+                                                                     Text="{Binding Value, Mode=TwoWay}"
+                                                                     IsVisible="{Binding IsText}">
+                                                                <TextBox.InnerRightContent>
+                                                                    <!-- Record the value by pressing the keys instead of typing their names. -->
+                                                                    <Button Classes="chip-action"
+                                                                            Margin="0,0,4,0"
+                                                                            FontFamily="{StaticResource MdiFont}"
+                                                                            Content="&#xF030C;"
+                                                                            IsVisible="{Binding HasPicker}"
+                                                                            Command="{Binding PickCommand}"
+                                                                            ToolTip.Tip="{Binding PickerHint}" />
+                                                                </TextBox.InnerRightContent>
+                                                            </TextBox>
+                                                            <ComboBox Grid.Column="1"
+                                                                      HorizontalAlignment="Stretch"
+                                                                      ItemsSource="{Binding Options}"
+                                                                      SelectedItem="{Binding Value, Mode=TwoWay}"
+                                                                      IsVisible="{Binding IsEnum}" />
+                                                            <CheckBox Grid.Column="1"
+                                                                      IsChecked="{Binding BoolValue, Mode=TwoWay}"
+                                                                      IsVisible="{Binding IsBool}" />
+                                                        </Grid>
+                                                    </DataTemplate>
+                                                </ItemsControl.ItemTemplate>
+                                            </ItemsControl>
+                                            <TextBlock Classes="hint"
+                                                       Text="{loc:Tr RotaryButton_ThisCommandHasNoParameters}"
+                                                       IsVisible="{Binding !Parameters.Count}" />
+                                        </StackPanel>
+
+                                        <!-- Unknown / shell command: single free-text field -->
+                                        <Grid ColumnDefinitions="120,*" RowDefinitions="Auto,Auto"
+                                              IsVisible="{Binding !IsKnown}">
+                                            <TextBlock Grid.Column="0"
+                                                       Classes="editor-label"
+                                                       Text="{loc:Tr RotaryButton_Command}"
+                                                       VerticalAlignment="Center"
+                                                       Margin="0,0,10,0" />
+                                            <TextBox Grid.Column="1"
+                                                     Text="{Binding ShellText, Mode=TwoWay}" />
+                                            <TextBlock Grid.Row="1" Grid.Column="1" Margin="0,6,0,0"
+                                                       TextWrapping="Wrap" MaxWidth="360" HorizontalAlignment="Left"
+                                                       Classes="editor-label"
+                                                       Text="{Binding UnavailableHint}"
+                                                       IsVisible="{Binding IsUnavailable}" />
+                                        </Grid>
+                                    </Panel>
+                                </Flyout>
+                            </Button.Flyout>
+                        </Button>
+
+                        <Button Grid.Column="4" Classes="chip-action danger"
+                                VerticalAlignment="Center"
+                                FontFamily="{StaticResource MdiFont}"
+                                Content="&#xF01B4;"
+                                ToolTip.Tip="{loc:Tr RotaryButton_RemoveCommand}"
+                                Click="RemoveCommand_Click" />
+                    </Grid>
+                </Border>
+            </StackPanel>
+        </DataTemplate>
+    </Window.Resources>
+
+    <Window.Styles>
+        <StyleInclude Source="avares://LoupixDeck/Views/Styles/SettingsStyles.axaml" />
+
+        <!-- Highlights the sequence strip that double-click-to-append targets. -->
+        <Style Selector="Border.sequence-strip.active">
+            <Setter Property="BorderBrush" Value="#FF66AAFF" />
+            <Setter Property="Background" Value="{DynamicResource AppAccentSubtle}" />
+        </Style>
+    </Window.Styles>
+
+    <!-- Single-cell root so the drag-ghost canvas can float over the whole window. -->
+    <Grid>
+        <Grid RowDefinitions="Auto,Auto,*" Margin="12">
+
+            <!-- Title -->
+            <TextBlock Grid.Row="0"
+                       Text="{Binding KnobLabel}"
+                       FontSize="22" FontWeight="Bold"
+                       Margin="0,0,0,8" />
+
+            <!-- OFF toggle + side-strip label sit directly under the title, above
+                 the command slots. The label shows on the dial's side-strip segment
+                 (segmented mode, Razer); ignored on devices without side strips. -->
+            <Grid Grid.Row="1" ColumnDefinitions="Auto,*" Margin="0,0,0,8">
+                <CheckBox Grid.Column="0"
+                          Content="{loc:Tr RotaryButton_RunAlsoWhenDeviceIs}"
+                          IsChecked="{Binding ButtonData.EnableWhenOff}"
+                          VerticalAlignment="Center" />
+                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8"
+                            HorizontalAlignment="Right" VerticalAlignment="Center">
+                    <TextBlock Text="{loc:Tr RotaryButton_StripLabel}" VerticalAlignment="Center" />
+                    <TextBox Width="200"
+                             Text="{Binding ButtonData.DisplayText, Mode=TwoWay}"
+                             ToolTip.Tip="{loc:Tr RotaryButton_LabelShownForThisKnob}" />
+                </StackPanel>
+            </Grid>
+
+            <!-- Two columns: left = the three command sequences, right = the
+                 command library to pick from. -->
+            <!-- The left column is sized to fit exactly two command chips per row
+                 with equal space either side: 2 chips = 2 x (22 gutter + 210 chip
+                 + 6 margin) = 476, minus the leading gutter and trailing margin
+                 absorbed by the negative margins above = 448 of strip content,
+                 + 24 strip padding + 2 strip border + 12 gap to the picker = 486.
+                 Everything left over goes to the picker. -->
+            <Grid Grid.Row="2" ColumnDefinitions="486,*">
+
+                <!-- Left: three sequence strips, equal share of the height. Click
+                     a strip to make it the double-click target. -->
+                <Grid Grid.Column="0" RowDefinitions="*,*,*" Margin="0,0,12,0">
+
+                    <!-- Rotate Left -->
+                    <Border Grid.Row="0" Name="CommandDropZoneLeft"
+                            x:DataType="vm:CommandSequenceSlot"
+                            DataContext="{Binding RotaryLeftSlot}"
+                            Classes="sequence-strip"
+                            Classes.active="{Binding IsActive}"
+                            Margin="0,0,0,10">
+                        <Grid RowDefinitions="Auto,*">
+                            <Grid Grid.Row="0" ColumnDefinitions="*,Auto" Margin="0,0,0,8">
+                                <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                                    <TextBlock Text="{Binding Title}" FontWeight="SemiBold" />
+                                    <TextBlock Classes="hint"
+                                               Text="{loc:TrFormat Common_CommandCountFmt, Commands.Count}" />
+                                </StackPanel>
+                                <Button Grid.Column="1" Content="{loc:Tr RotaryButton_Clear}"
+                                        Command="{Binding ClearCommandCommand}"
+                                        IsEnabled="{Binding HasCommand}"
+                                        VerticalAlignment="Center"
+                                        MinWidth="70"
+                                        HorizontalContentAlignment="Center"
+                                        ToolTip.Tip="{loc:Tr RotaryButton_RemoveAllCommandsInThis}" />
+                            </Grid>
+                            <Panel Grid.Row="1" MinHeight="36">
+                                <!-- Pulled left by the leading arrow gutter (22) so the first
+                                     chip of each row lines up with the strip's title, and
+                                     widened right by the chip's trailing margin (6) so the
+                                     wrap width still fits two chips per row. -->
+                                <ScrollViewer Margin="-22,0,-6,0"
+                                              HorizontalScrollBarVisibility="Disabled"
+                                              VerticalScrollBarVisibility="Auto">
+                                    <ItemsControl Name="CommandListLeft"
+                                                  ItemsSource="{Binding Commands}"
+                                                  VerticalAlignment="Top"
+                                                  ItemsPanel="{StaticResource ChipPanel}"
+                                                  ItemTemplate="{StaticResource CommandChipTemplate}"
+                                                  PointerMoved="CommandList_PointerMoved"
+                                                  PointerReleased="CommandList_PointerReleased"
+                                                  PointerCaptureLost="CommandList_PointerCaptureLost" />
+                                </ScrollViewer>
+                                <TextBlock Classes="hint" VerticalAlignment="Center"
+                                           Text="{loc:Tr RotaryButton_EmptyClickThisStripThen}"
+                                           IsVisible="{Binding !Commands.Count}" />
+                            </Panel>
+                        </Grid>
+                    </Border>
+
+                    <!-- Rotate Right -->
+                    <Border Grid.Row="1" Name="CommandDropZoneRight"
+                            x:DataType="vm:CommandSequenceSlot"
+                            DataContext="{Binding RotaryRightSlot}"
+                            Classes="sequence-strip"
+                            Classes.active="{Binding IsActive}"
+                            Margin="0,0,0,10">
+                        <Grid RowDefinitions="Auto,*">
+                            <Grid Grid.Row="0" ColumnDefinitions="*,Auto" Margin="0,0,0,8">
+                                <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                                    <TextBlock Text="{Binding Title}" FontWeight="SemiBold" />
+                                    <TextBlock Classes="hint"
+                                               Text="{loc:TrFormat Common_CommandCountFmt, Commands.Count}" />
+                                </StackPanel>
+                                <Button Grid.Column="1" Content="{loc:Tr RotaryButton_Clear}"
+                                        Command="{Binding ClearCommandCommand}"
+                                        IsEnabled="{Binding HasCommand}"
+                                        VerticalAlignment="Center"
+                                        MinWidth="70"
+                                        HorizontalContentAlignment="Center"
+                                        ToolTip.Tip="{loc:Tr RotaryButton_RemoveAllCommandsInThis}" />
+                            </Grid>
+                            <Panel Grid.Row="1" MinHeight="36">
+                                <!-- Pulled left by the leading arrow gutter (22) so the first
+                                     chip of each row lines up with the strip's title, and
+                                     widened right by the chip's trailing margin (6) so the
+                                     wrap width still fits two chips per row. -->
+                                <ScrollViewer Margin="-22,0,-6,0"
+                                              HorizontalScrollBarVisibility="Disabled"
+                                              VerticalScrollBarVisibility="Auto">
+                                    <ItemsControl Name="CommandListRight"
+                                                  ItemsSource="{Binding Commands}"
+                                                  VerticalAlignment="Top"
+                                                  ItemsPanel="{StaticResource ChipPanel}"
+                                                  ItemTemplate="{StaticResource CommandChipTemplate}"
+                                                  PointerMoved="CommandList_PointerMoved"
+                                                  PointerReleased="CommandList_PointerReleased"
+                                                  PointerCaptureLost="CommandList_PointerCaptureLost" />
+                                </ScrollViewer>
+                                <TextBlock Classes="hint" VerticalAlignment="Center"
+                                           Text="{loc:Tr RotaryButton_EmptyClickThisStripThen}"
+                                           IsVisible="{Binding !Commands.Count}" />
+                            </Panel>
+                        </Grid>
+                    </Border>
+
+                    <!-- Button Press -->
+                    <Border Grid.Row="2" Name="CommandDropZonePress"
+                            x:DataType="vm:CommandSequenceSlot"
+                            DataContext="{Binding ButtonPressSlot}"
+                            Classes="sequence-strip"
+                            Classes.active="{Binding IsActive}">
+                        <Grid RowDefinitions="Auto,*">
+                            <Grid Grid.Row="0" ColumnDefinitions="*,Auto" Margin="0,0,0,8">
+                                <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                                    <TextBlock Text="{Binding Title}" FontWeight="SemiBold" />
+                                    <TextBlock Classes="hint"
+                                               Text="{loc:TrFormat Common_CommandCountFmt, Commands.Count}" />
+                                </StackPanel>
+                                <Button Grid.Column="1" Content="{loc:Tr RotaryButton_Clear}"
+                                        Command="{Binding ClearCommandCommand}"
+                                        IsEnabled="{Binding HasCommand}"
+                                        VerticalAlignment="Center"
+                                        MinWidth="70"
+                                        HorizontalContentAlignment="Center"
+                                        ToolTip.Tip="{loc:Tr RotaryButton_RemoveAllCommandsInThis}" />
+                            </Grid>
+                            <Panel Grid.Row="1" MinHeight="36">
+                                <!-- Pulled left by the leading arrow gutter (22) so the first
+                                     chip of each row lines up with the strip's title, and
+                                     widened right by the chip's trailing margin (6) so the
+                                     wrap width still fits two chips per row. -->
+                                <ScrollViewer Margin="-22,0,-6,0"
+                                              HorizontalScrollBarVisibility="Disabled"
+                                              VerticalScrollBarVisibility="Auto">
+                                    <ItemsControl Name="CommandListPress"
+                                                  ItemsSource="{Binding Commands}"
+                                                  VerticalAlignment="Top"
+                                                  ItemsPanel="{StaticResource ChipPanel}"
+                                                  ItemTemplate="{StaticResource CommandChipTemplate}"
+                                                  PointerMoved="CommandList_PointerMoved"
+                                                  PointerReleased="CommandList_PointerReleased"
+                                                  PointerCaptureLost="CommandList_PointerCaptureLost" />
+                                </ScrollViewer>
+                                <TextBlock Classes="hint" VerticalAlignment="Center"
+                                           Text="{loc:Tr RotaryButton_EmptyClickThisStripThen}"
+                                           IsVisible="{Binding !Commands.Count}" />
+                            </Panel>
+                        </Grid>
+                    </Border>
+                </Grid>
+
+                <!-- Right: master-detail command picker, full height (issue #171) -->
+                <Border Grid.Column="1"
+                        BorderBrush="{DynamicResource AppBorderSubtle}" BorderThickness="1" CornerRadius="4"
+                        Padding="4">
+                    <views:CommandPickerView Name="PickerControl"
+                                             DataContext="{Binding CommandPicker}" />
+                </Border>
+            </Grid>
+        </Grid>
+
+        <!-- ===== Drag ghost =====
+             Floating chip that follows the cursor while dragging a command from
+             the tree into a sequence strip. Spans the whole window, never hit-
+             tests, and is positioned from code-behind during the drag. -->
+        <Canvas Name="DragGhostLayer"
+                IsHitTestVisible="False" IsVisible="False">
+            <!-- Insertion marker: vertical bar shown at the slot where the
+                 dragged command will land. Positioned from code-behind. -->
+            <Rectangle Name="DropMarker" Width="3"
+                       Fill="#4DA3FF" RadiusX="1.5" RadiusY="1.5"
+                       IsVisible="False" />
+            <Border Name="DragGhost" Classes="drag-ghost">
+                <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                    <TextBlock Text="&#xF01DB;" FontFamily="{StaticResource MdiFont}"
+                               FontSize="16" VerticalAlignment="Center"
+                               Foreground="{DynamicResource AppTextMuted}" />
+                    <TextBlock Name="DragGhostText" Classes="chip-title"
+                               VerticalAlignment="Center" />
+                </StackPanel>
+            </Border>
+        </Canvas>
+    </Grid>
+</Window>
